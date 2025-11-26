@@ -1,15 +1,14 @@
-export enum SkillLevel {
-  Weakness = 'Weakness',
-  Neutral = 'Neutral',
-  Strength = 'Strength',
-}
+
+export type SkillLevel = 1 | 2 | 3 | 4 | 5 | 'N/A';
 
 export enum SkillCategory {
   Swimming = 'Swimming & Conditioning',
-  Legs = 'Leg Work',
+  Treading = 'Treading (Legs)',
   BallHandling = 'Ball Handling',
+  Passing = 'Passing',
   Shooting = 'Shooting',
   Defense = 'Defense',
+  HoleSetDefense = 'Hole Set Defense',
   Offense = 'Offense',
   Goalie = 'Goalie Skills',
 }

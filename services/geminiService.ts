@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Player, PracticePlan, SkillLevel } from "../types";
+import { Player, PracticePlan } from "../types";
 
 const drillSchema: Schema = {
   type: Type.OBJECT,
@@ -43,15 +43,16 @@ export const generatePracticePlan = async (
 
     const ai = new GoogleGenAI({ apiKey });
     
-    let prompt = "";
-    let systemInstruction = "You are a world-class Water Polo coach designed to create high-performance practice plans.";
+    let systemInstruction = `You are a world-class Water Polo coach designed to create high-performance practice plans.`;
 
     const serializedRoster = JSON.stringify(players.map(p => ({
       name: p.name,
       position: p.position,
-      skills: p.skills,
+      skills: p.skills, // This will now send 1-5 or N/A
       custom_skills: p.customSkills
     })), null, 2);
+
+    let prompt = "";
 
     if (mode === 'recovery' && injuryContext) {
       const playerName = focusPlayers && focusPlayers.length > 0 ? focusPlayers[0].name : "the athlete";
@@ -93,7 +94,7 @@ export const generatePracticePlan = async (
       prompt = `
         Create a high-intensity Conditioning Set for the following players: ${names}.
         
-        Detailed Player Profiles:
+        Detailed Player Profiles (Skills rated 1-5):
         ${JSON.stringify(detailedProfiles, null, 2)}
 
         The goal is to physically strengthen these players. Analyze their collective weaknesses. 
@@ -120,10 +121,10 @@ export const generatePracticePlan = async (
       prompt = `
         Create a personalized small-group practice plan (1 hour) for the following players: ${names}.
         
-        Player Profiles:
+        Player Profiles (Skills rated 1-5):
         ${JSON.stringify(detailedProfiles, null, 2)}
 
-        Focus heavily on improving the 'Weakness' areas identified in these profiles.
+        Focus heavily on improving the lower-rated areas (1-2) identified in these profiles.
         If they share weaknesses, focus on those. If they have complementary strengths, use them in drills (e.g., a good passer working with a good shooter).
         
         Since this is a group of ${focusPlayers.length} specific players, ensure the drills allow them to work together.
@@ -133,12 +134,12 @@ export const generatePracticePlan = async (
       prompt = `
         Create a 2-hour TEAM practice plan for the following roster.
         
-        Roster Data (includes standard skills and personalized custom skills):
+        Roster Data (Skills rated 1-5):
         ${serializedRoster}
 
-        Analyze the collective weaknesses of the team. 
+        Analyze the collective weaknesses of the team based on the 1-5 ratings (1 is worst, 5 is best). 
         If many players are weak in a specific area (e.g., Defense), prioritize drills for that.
-        Pay attention to custom skills marked as 'Weakness' for potential specialized improvement drills.
+        Pay attention to custom skills marked as low level for potential specialized improvement drills.
         Include a mix of warm-up, skill building, and scrimmaging components.
       `;
     }

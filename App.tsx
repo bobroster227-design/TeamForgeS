@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { 
   Users, 
   Activity, 
@@ -19,9 +19,12 @@ import {
   Calendar,
   FolderOpen,
   Stethoscope,
-  AlertCircle
+  AlertCircle,
+  Download,
+  Upload,
+  Play
 } from 'lucide-react';
-import { Player, ViewState, SkillCategory, SkillLevel, PracticePlan, CustomSkill } from './types';
+import { Player, ViewState, SkillCategory, SkillLevel, PracticePlan, CustomSkill, Drill } from './types';
 import { INITIAL_ROSTER, POSITIONS, SKILL_CATEGORIES_LIST } from './constants';
 import { generatePracticePlan } from './services/geminiService';
 import SkillRadar from './components/SkillRadar';
@@ -52,6 +55,23 @@ const App = () => {
 
   // Custom Skill Form State
   const [newCustomSkill, setNewCustomSkill] = useState('');
+  
+  // File Input Ref
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Helper for avatar colors
+  const getAvatarGradient = (name: string) => {
+    const gradients = [
+      'from-blue-400 to-indigo-500',
+      'from-emerald-400 to-teal-500',
+      'from-orange-400 to-red-500',
+      'from-purple-400 to-pink-500',
+      'from-cyan-400 to-blue-500',
+      'from-lime-400 to-green-500',
+    ];
+    const index = name.length % gradients.length;
+    return gradients[index];
+  };
 
   // Handlers
   const addPlayer = () => {
@@ -62,7 +82,7 @@ const App = () => {
       position: newPlayerPos,
       skills: SKILL_CATEGORIES_LIST.reduce((acc, cat) => ({
         ...acc,
-        [cat]: SkillLevel.Neutral
+        [cat]: 3 // Default to middle (3)
       }), {} as Record<SkillCategory, SkillLevel>),
       customSkills: []
     };
@@ -123,6 +143,86 @@ const App = () => {
     } else {
       setSelectedPlannerIds([...selectedPlannerIds, id]);
     }
+  };
+  
+  // CSV Handlers
+  const handleExportCSV = () => {
+    const headers = ['Name', 'Position', ...SKILL_CATEGORIES_LIST].join(',');
+    const rows = roster.map(p => {
+       const skillValues = SKILL_CATEGORIES_LIST.map(cat => p.skills[cat]).join(',');
+       return `${p.name},${p.position},${skillValues}`;
+    }).join('\n');
+    
+    const csvContent = `data:text/csv;charset=utf-8,${headers}\n${rows}`;
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', 'team_roster.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleImportCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (!text) return;
+      
+      try {
+        const lines = text.split('\n');
+        const headers = lines[0].split(',').map(h => h.trim());
+        const newPlayers: Player[] = [];
+
+        // Basic validation: Check if headers minimally match expectations
+        if (!headers.includes('Name') || !headers.includes('Position')) {
+          alert("Invalid CSV format. Missing Name or Position headers.");
+          return;
+        }
+
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          const values = lines[i].split(',');
+          if (values.length < 2) continue;
+
+          const name = values[0].trim();
+          const position = values[1].trim();
+          
+          const skills: Record<SkillCategory, SkillLevel> = {} as any;
+          
+          // Try to map skills if they exist in CSV
+          SKILL_CATEGORIES_LIST.forEach((cat, index) => {
+            const headerIndex = headers.indexOf(cat);
+            if (headerIndex !== -1 && values[headerIndex]) {
+               const val = values[headerIndex].trim();
+               skills[cat] = val === 'N/A' ? 'N/A' : parseInt(val) as any;
+               if (isNaN(skills[cat] as number) && skills[cat] !== 'N/A') skills[cat] = 3;
+            } else {
+               skills[cat] = 3;
+            }
+          });
+
+          newPlayers.push({
+            id: Date.now().toString() + i,
+            name,
+            position,
+            skills,
+            customSkills: []
+          });
+        }
+        
+        setRoster(prev => [...prev, ...newPlayers]);
+        alert(`Successfully imported ${newPlayers.length} players.`);
+      } catch (err) {
+        console.error(err);
+        alert("Failed to parse CSV.");
+      }
+    };
+    reader.readAsText(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleGenerate = async (mode: 'team' | 'individual' | 'conditioning' | 'recovery') => {
@@ -201,54 +301,81 @@ const App = () => {
     alert('Plan Saved to Plans tab!');
   };
 
-  // Components Helpers
-  const SkillButton = ({ 
+  // Group roster by position
+  const groupedRoster = useMemo(() => {
+    const groups: Record<string, Player[]> = {};
+    POSITIONS.forEach(pos => groups[pos] = []);
+    roster.forEach(p => {
+       if (!groups[p.position]) groups[p.position] = [];
+       groups[p.position].push(p);
+    });
+    return groups;
+  }, [roster]);
+
+  // Skill Rating Component
+  const SkillRating = ({ 
     current, 
-    target, 
-    onClick 
+    onChange 
   }: { 
     current: SkillLevel, 
-    target: SkillLevel, 
-    onClick: () => void 
+    onChange: (val: SkillLevel) => void 
   }) => {
-    const isActive = current === target;
-    let baseClass = "p-2 rounded-full transition-all duration-200 border transform active:scale-95 ";
-    
-    if (target === SkillLevel.Strength) {
-      baseClass += isActive ? "bg-green-100 border-green-500 text-green-700 shadow-sm" : "border-transparent text-slate-300 hover:text-green-400";
-    } else if (target === SkillLevel.Weakness) {
-      baseClass += isActive ? "bg-red-100 border-red-500 text-red-700 shadow-sm" : "border-transparent text-slate-300 hover:text-red-400";
-    } else {
-      baseClass += isActive ? "bg-slate-100 border-slate-400 text-slate-600 shadow-sm" : "border-transparent text-slate-300 hover:text-slate-500";
-    }
-
     return (
-      <button onClick={onClick} className={baseClass}>
-        {target === SkillLevel.Strength && <CheckCircle2 size={20} />}
-        {target === SkillLevel.Weakness && <XCircle size={20} />}
-        {target === SkillLevel.Neutral && <MinusCircle size={20} />}
-      </button>
+      <div className="flex items-center space-x-1">
+        <button 
+           onClick={() => onChange('N/A')}
+           className={`text-[10px] font-bold px-2 py-1 rounded border mr-2 transition-all ${
+             current === 'N/A' 
+               ? 'bg-slate-200 text-slate-600 border-slate-300 shadow-inner' 
+               : 'bg-white text-slate-300 border-slate-200 hover:border-slate-300'
+           }`}
+        >
+          N/A
+        </button>
+        {[1, 2, 3, 4, 5].map((val) => {
+          const isActive = current !== 'N/A' && current >= val;
+          const isSelected = current === val;
+          
+          let colorClass = "bg-slate-100 border-slate-200";
+          if (isActive) {
+             if (val <= 2) colorClass = "bg-red-400 border-red-500";
+             else if (val === 3) colorClass = "bg-yellow-400 border-yellow-500";
+             else colorClass = "bg-green-400 border-green-500";
+          }
+          
+          return (
+            <button
+              key={val}
+              onClick={() => onChange(val as SkillLevel)}
+              className={`w-6 h-8 rounded-sm border transition-all duration-200 ${colorClass} ${isSelected ? 'ring-2 ring-offset-1 ring-slate-300 scale-110' : 'opacity-70 hover:opacity-100'}`}
+              title={`Level ${val}`}
+            />
+          );
+        })}
+      </div>
     );
   };
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans relative overflow-x-hidden">
       {/* Background Decor */}
-      <div className="fixed inset-0 z-0 opacity-[0.03] pointer-events-none" 
+      <div className="fixed inset-0 z-0 opacity-[0.05] pointer-events-none" 
            style={{
-             backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
+             backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%230ea5e9' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
            }} 
       />
-      
+      <div className="fixed top-20 left-10 w-72 h-72 bg-pool-200 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
+      <div className="fixed bottom-20 right-10 w-96 h-96 bg-purple-200 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
+
       {/* Header */}
-      <header className="bg-gradient-to-r from-sky-900 via-pool-800 to-pool-700 text-white shadow-lg sticky top-0 z-50">
+      <header className="bg-gradient-to-r from-sky-900 via-pool-800 to-pool-700 text-white shadow-lg sticky top-0 z-50 border-b border-pool-600/50">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setView('roster')}>
-            <div className="bg-white/10 p-2 rounded-xl backdrop-blur-sm border border-white/20">
+          <div className="flex items-center space-x-3 cursor-pointer group" onClick={() => setView('roster')}>
+            <div className="bg-white/10 p-2 rounded-xl backdrop-blur-sm border border-white/20 group-hover:bg-white/20 transition-all">
               <LifeBuoy className="text-white h-7 w-7" />
             </div>
             <div>
-              <h1 className="text-2xl font-black tracking-tight leading-none">TeamForge</h1>
+              <h1 className="text-2xl font-black tracking-tight leading-none text-white drop-shadow-sm">TeamForge</h1>
               <p className="text-xs text-pool-200 font-medium tracking-normal md:tracking-wide">Your Own Personalized Water Polo Planner</p>
             </div>
           </div>
@@ -288,20 +415,42 @@ const App = () => {
         {/* VIEW: ROSTER */}
         {view === 'roster' && (
           <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6">
-                <h2 className="text-xl font-bold text-slate-800 flex items-center">
-                  <span className="bg-pool-100 text-pool-600 p-2 rounded-lg mr-3">
+            <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-slate-100 pb-6">
+                <h2 className="text-xl font-bold text-pool-900 flex items-center">
+                  <span className="bg-pool-100 text-pool-600 p-2 rounded-lg mr-3 shadow-sm">
                     <Users className="h-6 w-6" />
                   </span>
                   Team Roster
                 </h2>
-                <span className="text-sm font-medium text-slate-500 bg-slate-100 px-3 py-1 rounded-full mt-2 md:mt-0">
-                  {roster.length} Players Active
-                </span>
+                <div className="flex space-x-2 mt-2 md:mt-0">
+                  <input 
+                    type="file" 
+                    accept=".csv"
+                    className="hidden"
+                    ref={fileInputRef}
+                    onChange={handleImportCSV}
+                  />
+                  <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex items-center px-3 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
+                  >
+                    <Upload className="h-3 w-3 mr-1" /> Import CSV
+                  </button>
+                  <button 
+                    onClick={handleExportCSV}
+                    className="flex items-center px-3 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
+                  >
+                    <Download className="h-3 w-3 mr-1" /> Export CSV
+                  </button>
+                  <span className="text-sm font-medium text-pool-700 bg-pool-50 border border-pool-100 px-3 py-1.5 rounded-lg shadow-sm">
+                    {roster.length} Players
+                  </span>
+                </div>
               </div>
               
-              <div className="flex flex-col md:flex-row gap-4 mb-8 bg-slate-50 p-4 rounded-xl border border-slate-100">
+              {/* Add Player Form */}
+              <div className="flex flex-col md:flex-row gap-4 mb-8 bg-slate-50 p-4 rounded-xl border border-slate-100 shadow-inner">
                 <input 
                   type="text" 
                   placeholder="Player Name"
@@ -325,33 +474,49 @@ const App = () => {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {roster.map(player => (
-                  <div key={player.id} className="flex items-center justify-between p-4 bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-pool-300 transition-all group">
-                    <div className="flex items-center space-x-4">
-                      <div className="h-12 w-12 rounded-full bg-gradient-to-br from-pool-100 to-pool-50 flex items-center justify-center text-pool-700 font-black text-lg border-2 border-white shadow-sm">
-                        {player.name.charAt(0)}
+              {/* Grouped Player List */}
+              <div className="space-y-6">
+                 {POSITIONS.map(pos => {
+                    const playersInPos = groupedRoster[pos];
+                    if (playersInPos.length === 0) return null;
+
+                    return (
+                      <div key={pos} className="bg-slate-50/30 rounded-xl p-4 border border-slate-100/50">
+                         <h3 className="text-xs font-bold text-pool-800/60 uppercase tracking-wider mb-3 px-1 flex items-center">
+                           <span className="w-1 h-3 bg-pool-400 rounded-full mr-2"></span>
+                           {pos}s
+                         </h3>
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                           {playersInPos.map(player => (
+                              <div key={player.id} className="flex items-center justify-between p-4 bg-white rounded-xl border-l-4 border-l-pool-400 border-y border-r border-slate-100 shadow-sm hover:shadow-md hover:border-r-pool-200 transition-all group">
+                                <div className="flex items-center space-x-4">
+                                  <div className={`h-10 w-10 rounded-full bg-gradient-to-br ${getAvatarGradient(player.name)} flex items-center justify-center text-white font-black text-sm border-2 border-white shadow-sm`}>
+                                    {player.name.charAt(0)}
+                                  </div>
+                                  <div>
+                                    <p className="font-bold text-slate-800 group-hover:text-pool-700 transition-colors">{player.name}</p>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => removePlayer(player.id)}
+                                  className="text-slate-300 hover:text-red-500 p-2 transition-colors hover:bg-red-50 rounded-lg"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                           ))}
+                         </div>
                       </div>
-                      <div>
-                        <p className="font-bold text-slate-900 group-hover:text-pool-700 transition-colors">{player.name}</p>
-                        <p className="text-xs font-medium text-slate-500 bg-slate-100 inline-block px-2 py-0.5 rounded mt-0.5">{player.position}</p>
-                      </div>
-                    </div>
-                    <button 
-                      onClick={() => removePlayer(player.id)}
-                      className="text-slate-300 hover:text-red-500 p-2 transition-colors hover:bg-red-50 rounded-lg"
-                    >
-                      <Trash2 className="h-5 w-5" />
-                    </button>
-                  </div>
-                ))}
-                {roster.length === 0 && (
-                  <div className="col-span-full text-center py-12 text-slate-400">
-                    <div className="bg-slate-50 inline-block p-4 rounded-full mb-3">
+                    );
+                 })}
+
+                 {roster.length === 0 && (
+                  <div className="text-center py-12 text-slate-400">
+                    <div className="bg-slate-50 inline-block p-4 rounded-full mb-3 border border-slate-100">
                       <Users className="h-8 w-8 text-slate-300" />
                     </div>
                     <p className="font-medium">No players found.</p>
-                    <p className="text-sm">Add your first player above to get started.</p>
+                    <p className="text-sm">Add your first player above or import a CSV.</p>
                   </div>
                 )}
               </div>
@@ -360,7 +525,7 @@ const App = () => {
             <div className="flex justify-end">
               <button 
                 onClick={() => setView('assessment')}
-                className="flex items-center text-pool-700 hover:text-pool-900 font-bold bg-white px-6 py-3 rounded-xl shadow-sm border border-slate-200 hover:shadow-md transition-all"
+                className="flex items-center text-pool-700 hover:text-pool-900 font-bold bg-white px-6 py-3 rounded-xl shadow-md border border-slate-100 hover:shadow-lg transition-all"
               >
                 Start Assessment <ChevronRight className="ml-2 h-5 w-5" />
               </button>
@@ -372,7 +537,7 @@ const App = () => {
         {view === 'assessment' && (
           <div className="space-y-6 animate-in fade-in duration-300">
              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-black text-slate-800 flex items-center tracking-tight">
+                <h2 className="text-2xl font-black text-pool-900 flex items-center tracking-tight">
                   <span className="bg-gradient-to-br from-amber-100 to-amber-50 text-amber-600 p-2 rounded-xl mr-3 shadow-sm border border-amber-100">
                     <Activity className="h-6 w-6" />
                   </span>
@@ -382,23 +547,26 @@ const App = () => {
 
              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Player List / Selector */}
-                <div className="lg:col-span-1 space-y-3 bg-white p-4 rounded-2xl shadow-lg border border-slate-100 h-fit">
+                <div className="lg:col-span-1 space-y-3 bg-white p-4 rounded-2xl shadow-lg border border-slate-100 h-fit max-h-[calc(100vh-200px)] flex flex-col">
                   <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 px-2">Select Player</h3>
-                  <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+                  <div className="space-y-2 overflow-y-auto pr-1 flex-1 custom-scrollbar">
                     {roster.map(player => (
                       <button
                         key={player.id}
                         onClick={() => setSelectedPlayerId(player.id)}
-                        className={`w-full text-left p-3 rounded-xl border-2 transition-all duration-200 relative overflow-hidden ${
+                        className={`w-full text-left p-3 rounded-xl border-l-4 transition-all duration-200 relative overflow-hidden group ${
                           selectedPlayerId === player.id 
-                            ? 'bg-pool-50 border-pool-500 shadow-md z-10' 
-                            : 'bg-white border-transparent hover:bg-slate-50 hover:border-slate-200'
+                            ? 'bg-pool-50 border-l-pool-500 shadow-sm' 
+                            : 'bg-white border-l-transparent hover:bg-slate-50 hover:border-l-slate-300'
                         }`}
                       >
                         <div className="flex justify-between items-center relative z-10">
-                          <div>
-                            <div className={`font-bold ${selectedPlayerId === player.id ? 'text-pool-900' : 'text-slate-700'}`}>{player.name}</div>
-                            <div className="text-xs text-slate-500 font-medium">{player.position}</div>
+                          <div className="flex items-center gap-3">
+                             <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${getAvatarGradient(player.name)}`}></div>
+                             <div>
+                               <div className={`font-bold ${selectedPlayerId === player.id ? 'text-pool-900' : 'text-slate-700'}`}>{player.name}</div>
+                               <div className="text-xs text-slate-500 font-medium">{player.position}</div>
+                             </div>
                           </div>
                           {selectedPlayerId === player.id && <ChevronRight className="h-4 w-4 text-pool-500" />}
                         </div>
@@ -412,45 +580,44 @@ const App = () => {
                 <div className="lg:col-span-2">
                   {selectedPlayerId ? (
                     <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
-                      <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
+                      <div className="bg-gradient-to-br from-white to-pool-50/50 rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
                         {(() => {
                           const player = roster.find(p => p.id === selectedPlayerId)!;
                           return (
                             <>
                               <div className="flex flex-col md:flex-row justify-between items-start mb-8">
                                 <div>
-                                  <h3 className="text-3xl font-black text-slate-900 mb-1">{player.name}</h3>
-                                  <span className="inline-block bg-slate-100 text-slate-600 font-bold text-xs px-2 py-1 rounded uppercase tracking-wider">
+                                  <div className="flex items-center gap-3 mb-2">
+                                     <div className={`h-12 w-12 rounded-full bg-gradient-to-br ${getAvatarGradient(player.name)} flex items-center justify-center text-white text-lg font-black shadow-md border-2 border-white`}>
+                                       {player.name.charAt(0)}
+                                     </div>
+                                     <h3 className="text-3xl font-black text-slate-900">{player.name}</h3>
+                                  </div>
+                                  <span className="inline-block bg-white border border-slate-200 text-slate-600 font-bold text-xs px-3 py-1 rounded-full uppercase tracking-wider shadow-sm ml-1">
                                     {player.position}
                                   </span>
                                 </div>
-                                <div className="w-full md:w-48 h-48 self-center md:self-auto mt-6 md:mt-0 -mr-4">
+                                <div className="w-full md:w-48 h-48 self-center md:self-auto mt-6 md:mt-0 -mr-4 opacity-90">
                                   <SkillRadar player={player} />
                                 </div>
                               </div>
 
-                              <div className="space-y-1">
-                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 border-b pb-2">Core Competencies</h4>
+                              <div className="space-y-1 bg-white/60 rounded-xl p-4 border border-white/50 backdrop-blur-sm">
+                                <div className="flex justify-between items-center mb-4 border-b border-slate-200/60 pb-2">
+                                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Core Competencies</h4>
+                                   <div className="flex text-[10px] text-slate-400 uppercase font-bold space-x-4 pr-2">
+                                      <span>Poor (1)</span>
+                                      <span>Elite (5)</span>
+                                   </div>
+                                </div>
+                                
                                 {SKILL_CATEGORIES_LIST.map(category => (
-                                  <div key={category} className="flex items-center justify-between py-3 hover:bg-slate-50 rounded-lg px-2 transition-colors">
+                                  <div key={category} className="flex items-center justify-between py-3 hover:bg-white rounded-lg px-2 transition-colors border-b border-transparent hover:border-slate-100 hover:shadow-sm">
                                     <span className="text-sm font-bold text-slate-700">{category}</span>
-                                    <div className="flex items-center space-x-3">
-                                      <SkillButton 
-                                        current={player.skills[category]} 
-                                        target={SkillLevel.Weakness} 
-                                        onClick={() => updateSkill(player.id, category, SkillLevel.Weakness)}
-                                      />
-                                      <SkillButton 
-                                        current={player.skills[category]} 
-                                        target={SkillLevel.Neutral} 
-                                        onClick={() => updateSkill(player.id, category, SkillLevel.Neutral)}
-                                      />
-                                      <SkillButton 
-                                        current={player.skills[category]} 
-                                        target={SkillLevel.Strength} 
-                                        onClick={() => updateSkill(player.id, category, SkillLevel.Strength)}
-                                      />
-                                    </div>
+                                    <SkillRating 
+                                      current={player.skills[category]}
+                                      onChange={(val) => updateSkill(player.id, category, val)}
+                                    />
                                   </div>
                                 ))}
                               </div>
@@ -478,19 +645,19 @@ const App = () => {
                                     value={newCustomSkill}
                                     onChange={(e) => setNewCustomSkill(e.target.value)}
                                     onKeyDown={(e) => {
-                                      if (e.key === 'Enter') addCustomSkill(player.id, newCustomSkill, SkillLevel.Strength);
+                                      if (e.key === 'Enter') addCustomSkill(player.id, newCustomSkill, 5);
                                     }}
                                   />
                                   <div className="flex gap-1">
                                     <button 
-                                      onClick={() => addCustomSkill(player.id, newCustomSkill, SkillLevel.Weakness)}
+                                      onClick={() => addCustomSkill(player.id, newCustomSkill, 1)}
                                       className="p-2 rounded-xl bg-white text-red-500 hover:bg-red-50 hover:text-red-600 border border-slate-200 shadow-sm transition-colors"
                                       title="Add as Weakness"
                                     >
                                       <XCircle size={20} />
                                     </button>
                                     <button 
-                                      onClick={() => addCustomSkill(player.id, newCustomSkill, SkillLevel.Strength)}
+                                      onClick={() => addCustomSkill(player.id, newCustomSkill, 5)}
                                       className="p-2 rounded-xl bg-white text-green-500 hover:bg-green-50 hover:text-green-600 border border-slate-200 shadow-sm transition-colors"
                                       title="Add as Strength"
                                     >
@@ -506,9 +673,9 @@ const App = () => {
                                   {player.customSkills.map(skill => (
                                     <div key={skill.id} className="flex items-center justify-between p-3 bg-white rounded-xl border border-purple-100 shadow-sm">
                                       <div className="flex items-center gap-3">
-                                        {skill.level === SkillLevel.Strength ? (
+                                        {skill.level === 5 ? (
                                           <CheckCircle2 className="text-green-500 h-5 w-5" />
-                                        ) : skill.level === SkillLevel.Weakness ? (
+                                        ) : skill.level === 1 ? (
                                           <XCircle className="text-red-500 h-5 w-5" />
                                         ) : (
                                           <MinusCircle className="text-slate-400 h-5 w-5" />
@@ -546,7 +713,7 @@ const App = () => {
         {view === 'planner' && (
           <div className="max-w-6xl mx-auto space-y-10 animate-in fade-in duration-500">
             <div className="text-center space-y-3">
-              <h2 className="text-4xl font-black text-slate-900 tracking-tight">Mission Control</h2>
+              <h2 className="text-4xl font-black text-pool-900 tracking-tight">Mission Control</h2>
               <p className="text-slate-500 text-lg max-w-2xl mx-auto">Select a training module below. The AI will analyze your roster's data to construct the optimal session.</p>
             </div>
 
@@ -674,10 +841,10 @@ const App = () => {
         {view === 'recovery' && (
           <div className="max-w-2xl mx-auto space-y-6 animate-in slide-in-from-bottom-8 duration-500">
             <div className="text-center mb-8">
-              <div className="inline-flex items-center justify-center p-4 bg-red-50 rounded-full mb-6 ring-4 ring-red-50/50">
+              <div className="inline-flex items-center justify-center p-4 bg-red-50 rounded-full mb-6 ring-4 ring-red-50/50 shadow-sm">
                 <Stethoscope className="h-10 w-10 text-red-500" />
               </div>
-              <h2 className="text-3xl font-black text-slate-900 tracking-tight">Injury & Recovery</h2>
+              <h2 className="text-3xl font-black text-pool-900 tracking-tight">Injury & Recovery</h2>
               <p className="text-slate-500 mt-2 text-lg">AI-powered rehabilitation protocols for safe return to sport.</p>
             </div>
 
@@ -820,7 +987,7 @@ const App = () => {
 
               <div className="p-8 bg-slate-50/50 border-b border-slate-200">
                 <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 flex items-center">
-                  <ClipboardList className="w-4 h-4 mr-2" />
+                  <span className="w-1.5 h-1.5 bg-pool-500 rounded-full mr-2"></span>
                   Session Plan
                 </h3>
                 <div className="space-y-4">
@@ -852,7 +1019,7 @@ const App = () => {
         {view === 'plans' && (
           <div className="space-y-8 animate-in fade-in duration-300">
              <div className="flex items-center justify-between">
-                <h2 className="text-3xl font-black text-slate-900 flex items-center tracking-tight">
+                <h2 className="text-3xl font-black text-pool-900 flex items-center tracking-tight">
                   <span className="bg-pool-100 text-pool-700 p-2 rounded-xl mr-3">
                     <FolderOpen className="h-7 w-7" />
                   </span>
@@ -865,10 +1032,10 @@ const App = () => {
 
              {savedPlans.length === 0 ? (
                <div className="bg-white rounded-2xl border-2 border-slate-200 border-dashed p-16 text-center max-w-2xl mx-auto">
-                 <div className="bg-slate-50 inline-block p-6 rounded-full mb-6">
+                 <div className="bg-slate-50 inline-block p-6 rounded-full mb-6 border border-slate-100">
                    <FolderOpen className="h-12 w-12 text-slate-300" />
                  </div>
-                 <h3 className="text-xl font-bold text-slate-900 mb-2">Library Empty</h3>
+                 <h3 className="text-xl font-bold text-pool-900 mb-2">Library Empty</h3>
                  <p className="text-slate-500 mb-8 max-w-sm mx-auto">Generated plans can be saved here for future reference. Create your first plan to get started.</p>
                  <button 
                    onClick={() => setView('planner')}
@@ -882,7 +1049,12 @@ const App = () => {
                  {savedPlans.map((plan, idx) => (
                    <div 
                      key={idx} 
-                     className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col group"
+                     className={`bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col group border-t-4 ${
+                        plan.type === 'conditioning' ? 'border-t-emerald-500' : 
+                        plan.type === 'individual' ? 'border-t-purple-500' : 
+                        plan.type === 'recovery' ? 'border-t-red-500' :
+                        'border-t-pool-500'
+                     }`}
                      onClick={() => {
                        setPracticePlan(plan);
                        setView('results');
@@ -899,15 +1071,15 @@ const App = () => {
                            {plan.type || 'Practice'}
                          </div>
                          {plan.createdAt && (
-                           <div className="text-xs text-slate-400 font-medium flex items-center bg-slate-50 px-2 py-1 rounded-full">
+                           <div className="text-xs text-slate-400 font-medium flex items-center bg-slate-50 px-2 py-1 rounded-full border border-slate-100">
                              {new Date(plan.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                            </div>
                          )}
                        </div>
-                       <h3 className="font-bold text-slate-900 text-xl mb-3 line-clamp-2 group-hover:text-pool-600 transition-colors">{plan.title}</h3>
+                       <h3 className="font-bold text-slate-800 text-xl mb-3 line-clamp-2 group-hover:text-pool-600 transition-colors">{plan.title}</h3>
                        <p className="text-slate-500 text-sm line-clamp-3 leading-relaxed">{plan.summary}</p>
                      </div>
-                     <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-slate-500">
+                     <div className="bg-slate-50/50 px-6 py-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-slate-500">
                        <span className="flex items-center"><ClipboardList className="w-3 h-3 mr-1" /> {plan.drills.length} Drills</span>
                        <span className="flex items-center text-pool-600 group-hover:underline">
                          Open File <ChevronRight className="h-3 w-3 ml-1" />
@@ -924,7 +1096,7 @@ const App = () => {
   );
 };
 
-const DrillCard = ({ drill, index }: { drill: any, index: number }) => {
+const DrillCard: React.FC<{ drill: Drill, index: number }> = ({ drill, index }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   // Difficulty Colors
@@ -938,15 +1110,15 @@ const DrillCard = ({ drill, index }: { drill: any, index: number }) => {
   const catColor = drill.category === 'Weight Room' 
     ? 'bg-slate-100 text-slate-600 border-slate-200' 
     : drill.category === 'Pool Conditioning' || drill.category === 'Pool Recovery'
-      ? 'bg-cyan-50 text-cyan-600 border-cyan-100'
+      ? 'bg-cyan-100 text-cyan-600 border-cyan-200'
       : drill.category === 'Rehab'
-        ? 'bg-orange-50 text-orange-600 border-orange-100'
-      : 'bg-blue-50 text-blue-600 border-blue-100';
+        ? 'bg-orange-100 text-orange-600 border-orange-200'
+      : 'bg-blue-100 text-blue-600 border-blue-200';
 
   return (
-    <div className={`bg-white border rounded-xl transition-all duration-300 ${isOpen ? 'shadow-md border-pool-200 ring-1 ring-pool-100' : 'shadow-sm border-slate-200 hover:border-pool-200'}`}>
+    <div className={`bg-white border rounded-xl transition-all duration-300 ${isOpen ? 'shadow-lg border-pool-300 ring-1 ring-pool-100' : 'shadow-sm border-slate-200 hover:border-pool-300'}`}>
       <div 
-        className="flex flex-col md:flex-row md:items-center justify-between p-5 cursor-pointer"
+        className={`flex flex-col md:flex-row md:items-center justify-between p-5 cursor-pointer rounded-t-xl transition-colors ${isOpen ? 'bg-pool-50/50' : 'hover:bg-slate-50/50'}`}
         onClick={() => setIsOpen(!isOpen)}
       >
         <div className="flex items-start space-x-5">
@@ -954,41 +1126,43 @@ const DrillCard = ({ drill, index }: { drill: any, index: number }) => {
             {index + 1}
           </div>
           <div>
-            <h4 className={`font-bold text-lg transition-colors ${isOpen ? 'text-pool-700' : 'text-slate-800'}`}>{drill.name}</h4>
+            <h4 className={`font-bold text-lg transition-colors ${isOpen ? 'text-pool-800' : 'text-slate-800'}`}>{drill.name}</h4>
             <div className="flex flex-wrap gap-2 mt-2">
-              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md bg-slate-100 text-slate-500 border border-slate-200 flex items-center">
+              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md bg-white text-slate-500 border border-slate-200 flex items-center shadow-sm">
                 ⏱ {drill.duration}
               </span>
-              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border ${catColor}`}>
+              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border shadow-sm ${catColor}`}>
                 {drill.category}
               </span>
-              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border ${diffColor}`}>
+              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border shadow-sm ${diffColor}`}>
                 {drill.difficulty}
               </span>
             </div>
           </div>
         </div>
         <div className="mt-4 md:mt-0 md:ml-4 text-slate-300 self-end md:self-center">
-           <div className={`p-2 rounded-full transition-all ${isOpen ? 'bg-pool-50 text-pool-600 rotate-180' : 'hover:bg-slate-50'}`}>
+           <div className={`p-2 rounded-full transition-all ${isOpen ? 'bg-white text-pool-600 rotate-180 shadow-sm' : 'hover:bg-white hover:text-slate-400'}`}>
              <ChevronDown size={20} />
            </div>
         </div>
       </div>
       
       {isOpen && (
-        <div className="px-5 pb-6 md:pl-18 pr-6 border-t border-slate-100/50">
+        <div className="px-5 pb-6 md:pl-18 pr-6 border-t border-pool-100">
            <div className="pt-4 grid md:grid-cols-3 gap-8">
-              <div className="md:col-span-2">
-                <h5 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center">
-                  <span className="w-1 h-1 bg-slate-400 rounded-full mr-2"></span> Instructions
-                </h5>
-                <p className="text-slate-700 whitespace-pre-wrap leading-relaxed text-sm md:text-base">{drill.description}</p>
+              <div className="md:col-span-2 space-y-4">
+                <div>
+                    <h5 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center">
+                    <span className="w-1.5 h-1.5 bg-pool-400 rounded-full mr-2"></span> Instructions
+                    </h5>
+                    <p className="text-slate-700 whitespace-pre-wrap leading-relaxed text-sm md:text-base bg-slate-50 p-4 rounded-xl border border-slate-100">{drill.description}</p>
+                </div>
               </div>
-              <div className="bg-slate-50/80 p-5 rounded-xl border border-slate-100 h-fit">
-                <h5 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center">
-                  <span className="w-1 h-1 bg-pool-500 rounded-full mr-2"></span> Purpose
+              <div className="bg-gradient-to-br from-pool-50 to-white p-5 rounded-xl border border-pool-100 h-fit shadow-sm">
+                <h5 className="text-xs font-bold text-pool-400 uppercase tracking-widest mb-2 flex items-center">
+                  <span className="w-1.5 h-1.5 bg-pool-500 rounded-full mr-2"></span> Purpose
                 </h5>
-                <p className="text-sm text-slate-600 font-medium italic">"{drill.focus}"</p>
+                <p className="text-sm text-pool-900 font-medium italic">"{drill.focus}"</p>
               </div>
            </div>
         </div>
