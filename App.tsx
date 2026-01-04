@@ -34,8 +34,9 @@ const App = () => {
   const [roster, setRoster] = useState<Player[]>(INITIAL_ROSTER);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
   
-  // Planner State
-  const [selectedPlannerIds, setSelectedPlannerIds] = useState<string[]>([]);
+  // Planner States (Separated)
+  const [selectedIndividualIds, setSelectedIndividualIds] = useState<string[]>([]);
+  const [selectedConditioningIds, setSelectedConditioningIds] = useState<string[]>([]);
   
   // Recovery State
   const [injuryPlayerId, setInjuryPlayerId] = useState<string>('');
@@ -93,7 +94,8 @@ const App = () => {
   const removePlayer = (id: string) => {
     setRoster(roster.filter(p => p.id !== id));
     if (selectedPlayerId === id) setSelectedPlayerId(null);
-    setSelectedPlannerIds(selectedPlannerIds.filter(pid => pid !== id));
+    setSelectedIndividualIds(selectedIndividualIds.filter(pid => pid !== id));
+    setSelectedConditioningIds(selectedConditioningIds.filter(pid => pid !== id));
     if (injuryPlayerId === id) setInjuryPlayerId('');
   };
 
@@ -137,11 +139,19 @@ const App = () => {
     }));
   };
 
-  const togglePlannerSelection = (id: string) => {
-    if (selectedPlannerIds.includes(id)) {
-      setSelectedPlannerIds(selectedPlannerIds.filter(pid => pid !== id));
+  const toggleIndividualSelection = (id: string) => {
+    if (selectedIndividualIds.includes(id)) {
+      setSelectedIndividualIds(selectedIndividualIds.filter(pid => pid !== id));
     } else {
-      setSelectedPlannerIds([...selectedPlannerIds, id]);
+      setSelectedIndividualIds([...selectedIndividualIds, id]);
+    }
+  };
+
+  const toggleConditioningSelection = (id: string) => {
+    if (selectedConditioningIds.includes(id)) {
+      setSelectedConditioningIds(selectedConditioningIds.filter(pid => pid !== id));
+    } else {
+      setSelectedConditioningIds([...selectedConditioningIds, id]);
     }
   };
   
@@ -239,13 +249,20 @@ const App = () => {
       let focusGroup: Player[] | undefined = undefined;
       let context = '';
 
-      if (mode === 'individual' || mode === 'conditioning') {
-         if (selectedPlannerIds.length === 0) {
-            setGenerationError("Please select at least one player.");
+      if (mode === 'individual') {
+         if (selectedIndividualIds.length === 0) {
+            setGenerationError("Please select at least one player for Skill Focus.");
             setIsGenerating(false);
             return;
          }
-         focusGroup = roster.filter(p => selectedPlannerIds.includes(p.id));
+         focusGroup = roster.filter(p => selectedIndividualIds.includes(p.id));
+      } else if (mode === 'conditioning') {
+         if (selectedConditioningIds.length === 0) {
+            setGenerationError("Please select at least one player for Conditioning.");
+            setIsGenerating(false);
+            return;
+         }
+         focusGroup = roster.filter(p => selectedConditioningIds.includes(p.id));
       } else if (mode === 'recovery') {
         if (!injuryIssue.trim() || !injuryLocation.trim()) {
            setGenerationError("Please describe the injury and location.");
@@ -758,8 +775,8 @@ const App = () => {
                          <label key={p.id} className="flex items-center space-x-3 p-2 hover:bg-white rounded-lg cursor-pointer transition-colors group/item">
                             <input 
                               type="checkbox" 
-                              checked={selectedPlannerIds.includes(p.id)}
-                              onChange={() => togglePlannerSelection(p.id)}
+                              checked={selectedIndividualIds.includes(p.id)}
+                              onChange={() => toggleIndividualSelection(p.id)}
                               className="rounded-md w-4 h-4 text-purple-600 focus:ring-purple-500 border-slate-300"
                             />
                             <span className="text-sm font-medium text-slate-600 group-hover/item:text-slate-900">{p.name}</span>
@@ -771,10 +788,10 @@ const App = () => {
 
                   <button
                     onClick={() => handleGenerate('individual')}
-                    disabled={isGenerating || selectedPlannerIds.length === 0}
+                    disabled={isGenerating || selectedIndividualIds.length === 0}
                     className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 disabled:from-slate-300 disabled:to-slate-400 text-white py-4 rounded-xl font-bold transition-all shadow-md active:scale-95 flex justify-center items-center"
                   >
-                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Build Plan (${selectedPlannerIds.length})`}
+                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Build Plan (${selectedIndividualIds.length})`}
                   </button>
                 </div>
               </div>
@@ -798,8 +815,8 @@ const App = () => {
                          <label key={p.id} className="flex items-center space-x-3 p-2 hover:bg-white rounded-lg cursor-pointer transition-colors group/item">
                             <input 
                               type="checkbox" 
-                              checked={selectedPlannerIds.includes(p.id)}
-                              onChange={() => togglePlannerSelection(p.id)}
+                              checked={selectedConditioningIds.includes(p.id)}
+                              onChange={() => toggleConditioningSelection(p.id)}
                               className="rounded-md w-4 h-4 text-emerald-600 focus:ring-emerald-500 border-slate-300"
                             />
                             <span className="text-sm font-medium text-slate-600 group-hover/item:text-slate-900">{p.name}</span>
@@ -811,10 +828,10 @@ const App = () => {
 
                   <button
                     onClick={() => handleGenerate('conditioning')}
-                    disabled={isGenerating || selectedPlannerIds.length === 0}
+                    disabled={isGenerating || selectedConditioningIds.length === 0}
                     className="w-full bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 disabled:from-slate-300 disabled:to-slate-400 text-white py-4 rounded-xl font-bold transition-all shadow-md active:scale-95 flex justify-center items-center"
                   >
-                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Create Set (${selectedPlannerIds.length})`}
+                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Create Set (${selectedConditioningIds.length})`}
                   </button>
                 </div>
               </div>
