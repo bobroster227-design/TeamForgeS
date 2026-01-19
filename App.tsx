@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Users, 
   Activity, 
@@ -11,7 +11,6 @@ import {
   BrainCircuit,
   ChevronRight,
   ChevronDown,
-  UserPlus,
   Sparkles,
   Dumbbell,
   LifeBuoy,
@@ -22,22 +21,40 @@ import {
   AlertCircle,
   Download,
   Upload,
-  Play
+  Waves,
+  MessageSquare,
+  Send,
+  Info,
+  Zap,
+  Check
 } from 'lucide-react';
 import { Player, ViewState, SkillCategory, SkillLevel, PracticePlan, CustomSkill, Drill } from './types';
 import { INITIAL_ROSTER, POSITIONS, SKILL_CATEGORIES_LIST } from './constants';
-import { generatePracticePlan } from './services/geminiService';
+import { generatePracticePlan, askCoachQuestion, generateAdditionalDrill } from './services/geminiService';
 import SkillRadar from './components/SkillRadar';
+
+interface ChatMessage {
+  role: 'user' | 'coach';
+  text: string;
+  suggestedDrill?: Drill | null;
+  addedToPlan?: boolean;
+}
 
 const App = () => {
   const [view, setView] = useState<ViewState>('roster');
   const [roster, setRoster] = useState<Player[]>(INITIAL_ROSTER);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
   
-  // Planner States (Separated)
+  // Planner States
   const [selectedIndividualIds, setSelectedIndividualIds] = useState<string[]>([]);
   const [selectedConditioningIds, setSelectedConditioningIds] = useState<string[]>([]);
+  const [customPrompt, setCustomPrompt] = useState('');
   
+  // Chat States
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [isAsking, setIsAsking] = useState(false);
+
   // Recovery State
   const [injuryPlayerId, setInjuryPlayerId] = useState<string>('');
   const [injuryIssue, setInjuryIssue] = useState('');
@@ -59,20 +76,11 @@ const App = () => {
   
   // File Input Ref
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Helper for avatar colors
-  const getAvatarGradient = (name: string) => {
-    const gradients = [
-      'from-blue-400 to-indigo-500',
-      'from-emerald-400 to-teal-500',
-      'from-orange-400 to-red-500',
-      'from-purple-400 to-pink-500',
-      'from-cyan-400 to-blue-500',
-      'from-lime-400 to-green-500',
-    ];
-    const index = name.length % gradients.length;
-    return gradients[index];
-  };
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
 
   // Handlers
   const addPlayer = () => {
@@ -83,7 +91,7 @@ const App = () => {
       position: newPlayerPos,
       skills: SKILL_CATEGORIES_LIST.reduce((acc, cat) => ({
         ...acc,
-        [cat]: 3 // Default to middle (3)
+        [cat]: 3
       }), {} as Record<SkillCategory, SkillLevel>),
       customSkills: []
     };
@@ -102,194 +110,48 @@ const App = () => {
   const updateSkill = (playerId: string, category: SkillCategory, level: SkillLevel) => {
     setRoster(roster.map(p => {
       if (p.id !== playerId) return p;
-      return {
-        ...p,
-        skills: {
-          ...p.skills,
-          [category]: level
-        }
-      };
+      return { ...p, skills: { ...p.skills, [category]: level } };
     }));
   };
 
-  const addCustomSkill = (playerId: string, skillName: string, level: SkillLevel) => {
-    if (!skillName.trim()) return;
-    setRoster(roster.map(p => {
-      if (p.id !== playerId) return p;
-      const newSkill: CustomSkill = {
-        id: Date.now().toString(),
-        name: skillName,
-        level
-      };
-      return {
-        ...p,
-        customSkills: [...p.customSkills, newSkill]
-      };
-    }));
-    setNewCustomSkill('');
-  };
-
-  const removeCustomSkill = (playerId: string, skillId: string) => {
-    setRoster(roster.map(p => {
-      if (p.id !== playerId) return p;
-      return {
-        ...p,
-        customSkills: p.customSkills.filter(s => s.id !== skillId)
-      };
-    }));
-  };
-
-  const toggleIndividualSelection = (id: string) => {
-    if (selectedIndividualIds.includes(id)) {
-      setSelectedIndividualIds(selectedIndividualIds.filter(pid => pid !== id));
-    } else {
-      setSelectedIndividualIds([...selectedIndividualIds, id]);
-    }
-  };
-
-  const toggleConditioningSelection = (id: string) => {
-    if (selectedConditioningIds.includes(id)) {
-      setSelectedConditioningIds(selectedConditioningIds.filter(pid => pid !== id));
-    } else {
-      setSelectedConditioningIds([...selectedConditioningIds, id]);
-    }
-  };
-  
-  // CSV Handlers
-  const handleExportCSV = () => {
-    const headers = ['Name', 'Position', ...SKILL_CATEGORIES_LIST].join(',');
-    const rows = roster.map(p => {
-       const skillValues = SKILL_CATEGORIES_LIST.map(cat => p.skills[cat]).join(',');
-       return `${p.name},${p.position},${skillValues}`;
-    }).join('\n');
-    
-    const csvContent = `data:text/csv;charset=utf-8,${headers}\n${rows}`;
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', 'team_roster.csv');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleImportCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (!text) return;
-      
-      try {
-        const lines = text.split('\n');
-        const headers = lines[0].split(',').map(h => h.trim());
-        const newPlayers: Player[] = [];
-
-        // Basic validation: Check if headers minimally match expectations
-        if (!headers.includes('Name') || !headers.includes('Position')) {
-          alert("Invalid CSV format. Missing Name or Position headers.");
-          return;
-        }
-
-        for (let i = 1; i < lines.length; i++) {
-          if (!lines[i].trim()) continue;
-          const values = lines[i].split(',');
-          if (values.length < 2) continue;
-
-          const name = values[0].trim();
-          const position = values[1].trim();
-          
-          const skills: Record<SkillCategory, SkillLevel> = {} as any;
-          
-          // Try to map skills if they exist in CSV
-          SKILL_CATEGORIES_LIST.forEach((cat, index) => {
-            const headerIndex = headers.indexOf(cat);
-            if (headerIndex !== -1 && values[headerIndex]) {
-               const val = values[headerIndex].trim();
-               skills[cat] = val === 'N/A' ? 'N/A' : parseInt(val) as any;
-               if (isNaN(skills[cat] as number) && skills[cat] !== 'N/A') skills[cat] = 3;
-            } else {
-               skills[cat] = 3;
-            }
-          });
-
-          newPlayers.push({
-            id: Date.now().toString() + i,
-            name,
-            position,
-            skills,
-            customSkills: []
-          });
-        }
-        
-        setRoster(prev => [...prev, ...newPlayers]);
-        alert(`Successfully imported ${newPlayers.length} players.`);
-      } catch (err) {
-        console.error(err);
-        alert("Failed to parse CSV.");
-      }
-    };
-    reader.readAsText(file);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleGenerate = async (mode: 'team' | 'individual' | 'conditioning' | 'recovery') => {
+  const handleGenerate = async (mode: 'team' | 'individual' | 'conditioning' | 'recovery' | 'custom') => {
     if (roster.length === 0) {
-      setGenerationError("Roster is empty. Add players first.");
+      setGenerationError("Roster is empty.");
       return;
     }
     
     setIsGenerating(true);
     setGenerationError(null);
     setPracticePlan(null);
+    setChatHistory([]);
 
     try {
       let focusGroup: Player[] | undefined = undefined;
       let context = '';
 
-      if (mode === 'individual') {
-         if (selectedIndividualIds.length === 0) {
-            setGenerationError("Please select at least one player for Skill Focus.");
-            setIsGenerating(false);
-            return;
-         }
-         focusGroup = roster.filter(p => selectedIndividualIds.includes(p.id));
-      } else if (mode === 'conditioning') {
-         if (selectedConditioningIds.length === 0) {
-            setGenerationError("Please select at least one player for Conditioning.");
-            setIsGenerating(false);
-            return;
-         }
-         focusGroup = roster.filter(p => selectedConditioningIds.includes(p.id));
-      } else if (mode === 'recovery') {
+      if (mode === 'individual') focusGroup = roster.filter(p => selectedIndividualIds.includes(p.id));
+      else if (mode === 'conditioning') focusGroup = roster.filter(p => selectedConditioningIds.includes(p.id));
+      else if (mode === 'custom') context = customPrompt;
+      else if (mode === 'recovery') {
         if (!injuryIssue.trim() || !injuryLocation.trim()) {
            setGenerationError("Please describe the injury and location.");
            setIsGenerating(false);
            return;
         }
-        if (injuryPlayerId) {
-          focusGroup = roster.filter(p => p.id === injuryPlayerId);
-        }
+        if (injuryPlayerId) focusGroup = roster.filter(p => p.id === injuryPlayerId);
         context = `${injuryIssue} in ${injuryLocation}`;
       }
 
       const plan = await generatePracticePlan(roster, mode, focusGroup, context, mode === 'recovery' ? injurySeverity : undefined);
       if (plan) {
-        // Add metadata to plan
         plan.id = Date.now().toString();
         plan.createdAt = Date.now();
         plan.type = mode;
-        plan.participants = focusGroup ? focusGroup.map(p => p.name) : ['Team'];
-        if (mode === 'recovery' && !focusGroup) {
-           plan.participants = ['Injured Player'];
-        }
-        
+        plan.participants = focusGroup ? focusGroup.map(p => p.name) : (mode === 'recovery' ? ['Injured Player'] : ['Team']);
         setPracticePlan(plan);
         setView('results');
       } else {
-        setGenerationError("Failed to generate plan. Please check your API key or try again.");
+        setGenerationError("Failed to generate plan.");
       }
     } catch (err) {
       setGenerationError("An unexpected error occurred.");
@@ -298,890 +160,526 @@ const App = () => {
     }
   };
 
-  const saveCurrentPlan = () => {
-    if (!practicePlan) return;
+  const handleAskCoach = async () => {
+    if (!currentQuestion.trim() || !practicePlan) return;
     
-    // Auto-generate name based on participants and type
-    let name = practicePlan.title; // Default to AI title
-    if (practicePlan.type === 'individual' && practicePlan.participants) {
-      name = `${practicePlan.participants.join(', ')} Individual Focus`;
-    } else if (practicePlan.type === 'conditioning' && practicePlan.participants) {
-      name = `${practicePlan.participants.join(', ')} Conditioning`;
-    } else if (practicePlan.type === 'recovery' && practicePlan.participants) {
-      name = `${practicePlan.participants.join(', ')} Recovery Plan`;
-    } else if (practicePlan.type === 'team') {
-      name = `Team Practice - ${new Date().toLocaleDateString()}`;
-    }
+    const userQ = currentQuestion;
+    setCurrentQuestion('');
+    setChatHistory(prev => [...prev, { role: 'user', text: userQ }]);
+    setIsAsking(true);
 
-    const planToSave = { ...practicePlan, title: name };
-    setSavedPlans([planToSave, ...savedPlans]);
-    alert('Plan Saved to Plans tab!');
+    const answer = await askCoachQuestion(practicePlan, userQ);
+    setChatHistory(prev => [...prev, { role: 'coach', text: answer }]);
+    setIsAsking(false);
   };
 
-  // Group roster by position
+  const handleRequestSuggestion = async (type: 'warmup' | 'finisher' | 'skill' | 'extra') => {
+    if (!practicePlan) return;
+    
+    const labels = { warmup: 'Warmup', finisher: 'Finisher', skill: 'Skill Drill', extra: 'Extra Exercise' };
+    setChatHistory(prev => [...prev, { role: 'user', text: `Coach, can you suggest an additional ${labels[type]}?` }]);
+    setIsAsking(true);
+
+    const drill = await generateAdditionalDrill(practicePlan, type);
+    if (drill) {
+      setChatHistory(prev => [...prev, { 
+        role: 'coach', 
+        text: `Based on your current plan, I've designed this ${labels[type]} for the team. Would you like to add it to today's session?`,
+        suggestedDrill: drill
+      }]);
+    } else {
+      setChatHistory(prev => [...prev, { role: 'coach', text: "I couldn't draw up a new drill right now. Let's focus on the existing ones!" }]);
+    }
+    setIsAsking(false);
+  };
+
+  const handleAddDrillToPlan = (index: number) => {
+    const msg = chatHistory[index];
+    if (!msg || !msg.suggestedDrill || !practicePlan) return;
+
+    setPracticePlan({
+      ...practicePlan,
+      drills: [...practicePlan.drills, msg.suggestedDrill]
+    });
+
+    setChatHistory(prev => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], addedToPlan: true };
+      return copy;
+    });
+  };
+
+  const saveCurrentPlan = () => {
+    if (!practicePlan) return;
+    setSavedPlans([practicePlan, ...savedPlans]);
+    alert('Plan Saved!');
+  };
+
+  const toggleIndividualSelection = (id: string) => {
+    setSelectedIndividualIds(prev => prev.includes(id) ? prev.filter(pid => pid !== id) : [...prev, id]);
+  };
+
+  const toggleConditioningSelection = (id: string) => {
+    setSelectedConditioningIds(prev => prev.includes(id) ? prev.filter(pid => pid !== id) : [...prev, id]);
+  };
+
+  const getAvatarGradient = (name: string) => {
+    const gradients = ['from-blue-400 to-indigo-500', 'from-emerald-400 to-teal-500', 'from-orange-400 to-red-500', 'from-purple-400 to-pink-500'];
+    return gradients[name.length % gradients.length];
+  };
+
   const groupedRoster = useMemo(() => {
     const groups: Record<string, Player[]> = {};
     POSITIONS.forEach(pos => groups[pos] = []);
-    roster.forEach(p => {
-       if (!groups[p.position]) groups[p.position] = [];
-       groups[p.position].push(p);
-    });
+    roster.forEach(p => { if (groups[p.position]) groups[p.position].push(p); });
     return groups;
   }, [roster]);
 
-  // Skill Rating Component
-  const SkillRating = ({ 
-    current, 
-    onChange 
-  }: { 
-    current: SkillLevel, 
-    onChange: (val: SkillLevel) => void 
-  }) => {
-    return (
-      <div className="flex items-center space-x-1">
-        <button 
-           onClick={() => onChange('N/A')}
-           className={`text-[10px] font-bold px-2 py-1 rounded border mr-2 transition-all ${
-             current === 'N/A' 
-               ? 'bg-slate-200 text-slate-600 border-slate-300 shadow-inner' 
-               : 'bg-white text-slate-300 border-slate-200 hover:border-slate-300'
-           }`}
-        >
-          N/A
-        </button>
-        {[1, 2, 3, 4, 5].map((val) => {
-          const isActive = current !== 'N/A' && current >= val;
-          const isSelected = current === val;
-          
-          let colorClass = "bg-slate-100 border-slate-200";
-          if (isActive) {
-             if (val <= 2) colorClass = "bg-red-400 border-red-500";
-             else if (val === 3) colorClass = "bg-yellow-400 border-yellow-500";
-             else colorClass = "bg-green-400 border-green-500";
-          }
-          
-          return (
-            <button
-              key={val}
-              onClick={() => onChange(val as SkillLevel)}
-              className={`w-6 h-8 rounded-sm border transition-all duration-200 ${colorClass} ${isSelected ? 'ring-2 ring-offset-1 ring-slate-300 scale-110' : 'opacity-70 hover:opacity-100'}`}
-              title={`Level ${val}`}
-            />
-          );
-        })}
-      </div>
-    );
-  };
+  const SkillRating = ({ current, onChange }: { current: SkillLevel, onChange: (val: SkillLevel) => void }) => (
+    <div className="flex items-center space-x-1">
+      <button onClick={() => onChange('N/A')} className={`text-[10px] font-bold px-2 py-1 rounded border mr-2 ${current === 'N/A' ? 'bg-slate-200 text-slate-600' : 'bg-white text-slate-300'}`}>N/A</button>
+      {[1, 2, 3, 4, 5].map((val) => (
+        <button key={val} onClick={() => onChange(val as SkillLevel)} className={`w-6 h-8 rounded-sm border transition-all ${current !== 'N/A' && current >= val ? (val <= 2 ? 'bg-red-400' : val === 3 ? 'bg-yellow-400' : 'bg-green-400') : 'bg-slate-100 opacity-70'}`} />
+      ))}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans relative overflow-x-hidden">
-      {/* Background Decor */}
-      <div className="fixed inset-0 z-0 opacity-[0.05] pointer-events-none" 
-           style={{
-             backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%230ea5e9' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
-           }} 
-      />
-      <div className="fixed top-20 left-10 w-72 h-72 bg-pool-200 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
-      <div className="fixed bottom-20 right-10 w-96 h-96 bg-purple-200 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
-
-      {/* Header */}
       <header className="bg-gradient-to-r from-sky-900 via-pool-800 to-pool-700 text-white shadow-lg sticky top-0 z-50 border-b border-pool-600/50">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center space-x-3 cursor-pointer group" onClick={() => setView('roster')}>
-            <div className="bg-white/10 p-2 rounded-xl backdrop-blur-sm border border-white/20 group-hover:bg-white/20 transition-all">
-              <LifeBuoy className="text-white h-7 w-7" />
-            </div>
+            <LifeBuoy className="text-white h-7 w-7" />
             <div>
-              <h1 className="text-2xl font-black tracking-tight leading-none text-white drop-shadow-sm">TeamForge</h1>
-              <p className="text-xs text-pool-200 font-medium tracking-normal md:tracking-wide">Your Own Personalized Water Polo Planner</p>
+              <h1 className="text-2xl font-black leading-none text-white">TeamForge</h1>
+              <p className="text-xs text-pool-200">Personalized Water Polo AI</p>
             </div>
           </div>
           <nav className="hidden md:flex space-x-1">
-             {[
-               { id: 'roster', label: 'Roster', icon: Users },
-               { id: 'assessment', label: 'Skills', icon: Activity },
-               { id: 'planner', label: 'Planner', icon: BrainCircuit },
-               { id: 'recovery', label: 'Recovery', icon: Stethoscope },
-               { id: 'plans', label: 'Saved', icon: FolderOpen }
-             ].map(item => (
-                <button 
-                  key={item.id}
-                  onClick={() => setView(item.id as ViewState)}
-                  className={`flex items-center px-4 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ${
-                    view === item.id 
-                    ? 'bg-white/10 text-white shadow-inner border border-white/10' 
-                    : 'text-pool-100 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  <item.icon className={`h-4 w-4 mr-2 ${view === item.id ? 'text-pool-300' : 'opacity-70'}`} />
-                  {item.label}
-                </button>
-             ))}
+            {['roster', 'assessment', 'planner', 'recovery', 'plans'].map(id => (
+              <button key={id} onClick={() => setView(id as ViewState)} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${view === id ? 'bg-white/10 text-white shadow-inner' : 'text-pool-100 hover:text-white'}`}>
+                {id.charAt(0).toUpperCase() + id.slice(1)}
+              </button>
+            ))}
           </nav>
-          {/* Mobile Menu Button - simplified for this view */}
-          <div className="md:hidden flex space-x-2">
-            <button onClick={() => setView('planner')} className="p-2 text-white"><BrainCircuit /></button>
-            <button onClick={() => setView('recovery')} className="p-2 text-white"><Stethoscope /></button>
-          </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-5xl mx-auto w-full px-4 py-8 z-10 relative">
-        
-        {/* VIEW: ROSTER */}
+      <main className="flex-1 max-w-5xl mx-auto w-full px-4 py-8 z-10">
         {view === 'roster' && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-slate-100 pb-6">
-                <h2 className="text-xl font-bold text-pool-900 flex items-center">
-                  <span className="bg-pool-100 text-pool-600 p-2 rounded-lg mr-3 shadow-sm">
-                    <Users className="h-6 w-6" />
-                  </span>
-                  Team Roster
-                </h2>
-                <div className="flex space-x-2 mt-2 md:mt-0">
-                  <input 
-                    type="file" 
-                    accept=".csv"
-                    className="hidden"
-                    ref={fileInputRef}
-                    onChange={handleImportCSV}
-                  />
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center px-3 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
-                  >
-                    <Upload className="h-3 w-3 mr-1" /> Import CSV
-                  </button>
-                  <button 
-                    onClick={handleExportCSV}
-                    className="flex items-center px-3 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
-                  >
-                    <Download className="h-3 w-3 mr-1" /> Export CSV
-                  </button>
-                  <span className="text-sm font-medium text-pool-700 bg-pool-50 border border-pool-100 px-3 py-1.5 rounded-lg shadow-sm">
-                    {roster.length} Players
-                  </span>
-                </div>
-              </div>
-              
-              {/* Add Player Form */}
-              <div className="flex flex-col md:flex-row gap-4 mb-8 bg-slate-50 p-4 rounded-xl border border-slate-100 shadow-inner">
-                <input 
-                  type="text" 
-                  placeholder="Player Name"
-                  className="flex-1 border border-slate-200 rounded-lg px-4 py-3 focus:ring-2 focus:ring-pool-500 focus:outline-none transition-shadow shadow-sm"
-                  value={newPlayerName}
-                  onChange={(e) => setNewPlayerName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addPlayer()}
-                />
-                <select 
-                  className="border border-slate-200 rounded-lg px-4 py-3 bg-white focus:ring-2 focus:ring-pool-500 focus:outline-none shadow-sm"
-                  value={newPlayerPos}
-                  onChange={(e) => setNewPlayerPos(e.target.value)}
-                >
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl shadow-xl border p-6">
+              <h2 className="text-xl font-bold text-pool-900 flex items-center mb-6">
+                <Users className="h-6 w-6 mr-3" /> Team Roster
+              </h2>
+              <div className="flex flex-col md:flex-row gap-4 mb-8 bg-slate-50 p-4 rounded-xl">
+                <input type="text" placeholder="Name" className="flex-1 border rounded-lg px-4 py-3" value={newPlayerName} onChange={(e) => setNewPlayerName(e.target.value)} />
+                <select className="border rounded-lg px-4 py-3 bg-white" value={newPlayerPos} onChange={(e) => setNewPlayerPos(e.target.value)}>
                   {POSITIONS.map(p => <option key={p} value={p}>{p}</option>)}
                 </select>
-                <button 
-                  onClick={addPlayer}
-                  className="bg-gradient-to-r from-pool-600 to-pool-500 hover:from-pool-700 hover:to-pool-600 text-white px-6 py-3 rounded-lg font-bold flex items-center justify-center transition-all shadow-md active:scale-95"
-                >
-                  <Plus className="mr-2 h-5 w-5" /> Add
-                </button>
+                <button onClick={addPlayer} className="bg-pool-600 text-white px-6 py-3 rounded-lg font-bold flex items-center"><Plus className="mr-2" /> Add</button>
               </div>
-
-              {/* Grouped Player List */}
-              <div className="space-y-6">
-                 {POSITIONS.map(pos => {
-                    const playersInPos = groupedRoster[pos];
-                    if (playersInPos.length === 0) return null;
-
-                    return (
-                      <div key={pos} className="bg-slate-50/30 rounded-xl p-4 border border-slate-100/50">
-                         <h3 className="text-xs font-bold text-pool-800/60 uppercase tracking-wider mb-3 px-1 flex items-center">
-                           <span className="w-1 h-3 bg-pool-400 rounded-full mr-2"></span>
-                           {pos}s
-                         </h3>
-                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                           {playersInPos.map(player => (
-                              <div key={player.id} className="flex items-center justify-between p-4 bg-white rounded-xl border-l-4 border-l-pool-400 border-y border-r border-slate-100 shadow-sm hover:shadow-md hover:border-r-pool-200 transition-all group">
-                                <div className="flex items-center space-x-4">
-                                  <div className={`h-10 w-10 rounded-full bg-gradient-to-br ${getAvatarGradient(player.name)} flex items-center justify-center text-white font-black text-sm border-2 border-white shadow-sm`}>
-                                    {player.name.charAt(0)}
-                                  </div>
-                                  <div>
-                                    <p className="font-bold text-slate-800 group-hover:text-pool-700 transition-colors">{player.name}</p>
-                                  </div>
-                                </div>
-                                <button 
-                                  onClick={() => removePlayer(player.id)}
-                                  className="text-slate-300 hover:text-red-500 p-2 transition-colors hover:bg-red-50 rounded-lg"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              </div>
-                           ))}
-                         </div>
-                      </div>
-                    );
-                 })}
-
-                 {roster.length === 0 && (
-                  <div className="text-center py-12 text-slate-400">
-                    <div className="bg-slate-50 inline-block p-4 rounded-full mb-3 border border-slate-100">
-                      <Users className="h-8 w-8 text-slate-300" />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {roster.map(p => (
+                  <div key={p.id} className="flex items-center justify-between p-4 bg-white rounded-xl border-l-4 border-l-pool-400 shadow-sm transition-all hover:shadow-md">
+                    <div className="flex items-center space-x-4">
+                      <div className={`h-10 w-10 rounded-full bg-gradient-to-br ${getAvatarGradient(p.name)} flex items-center justify-center text-white font-black`}>{p.name.charAt(0)}</div>
+                      <p className="font-bold text-slate-800">{p.name} <span className="text-xs font-normal text-slate-400">({p.position})</span></p>
                     </div>
-                    <p className="font-medium">No players found.</p>
-                    <p className="text-sm">Add your first player above or import a CSV.</p>
+                    <button onClick={() => removePlayer(p.id)} className="text-slate-300 hover:text-red-500 transition-colors"><Trash2 className="h-4 w-4" /></button>
                   </div>
-                )}
+                ))}
               </div>
-            </div>
-            
-            <div className="flex justify-end">
-              <button 
-                onClick={() => setView('assessment')}
-                className="flex items-center text-pool-700 hover:text-pool-900 font-bold bg-white px-6 py-3 rounded-xl shadow-md border border-slate-100 hover:shadow-lg transition-all"
-              >
-                Start Assessment <ChevronRight className="ml-2 h-5 w-5" />
-              </button>
             </div>
           </div>
         )}
 
-        {/* VIEW: SKILL ASSESSMENT */}
         {view === 'assessment' && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-             <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-black text-pool-900 flex items-center tracking-tight">
-                  <span className="bg-gradient-to-br from-amber-100 to-amber-50 text-amber-600 p-2 rounded-xl mr-3 shadow-sm border border-amber-100">
-                    <Activity className="h-6 w-6" />
-                  </span>
-                  Skill Assessment
-                </h2>
-             </div>
-
-             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Player List / Selector */}
-                <div className="lg:col-span-1 space-y-3 bg-white p-4 rounded-2xl shadow-lg border border-slate-100 h-fit max-h-[calc(100vh-200px)] flex flex-col">
-                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 px-2">Select Player</h3>
-                  <div className="space-y-2 overflow-y-auto pr-1 flex-1 custom-scrollbar">
-                    {roster.map(player => (
-                      <button
-                        key={player.id}
-                        onClick={() => setSelectedPlayerId(player.id)}
-                        className={`w-full text-left p-3 rounded-xl border-l-4 transition-all duration-200 relative overflow-hidden group ${
-                          selectedPlayerId === player.id 
-                            ? 'bg-pool-50 border-l-pool-500 shadow-sm' 
-                            : 'bg-white border-l-transparent hover:bg-slate-50 hover:border-l-slate-300'
-                        }`}
-                      >
-                        <div className="flex justify-between items-center relative z-10">
-                          <div className="flex items-center gap-3">
-                             <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${getAvatarGradient(player.name)}`}></div>
-                             <div>
-                               <div className={`font-bold ${selectedPlayerId === player.id ? 'text-pool-900' : 'text-slate-700'}`}>{player.name}</div>
-                               <div className="text-xs text-slate-500 font-medium">{player.position}</div>
-                             </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-1 bg-white p-4 rounded-2xl shadow-lg h-fit max-h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4 px-2">Roster</h3>
+              {roster.map(p => (
+                <button key={p.id} onClick={() => setSelectedPlayerId(p.id)} className={`w-full text-left p-3 rounded-xl border-l-4 mb-2 transition-all ${selectedPlayerId === p.id ? 'bg-pool-50 border-l-pool-500 shadow-sm' : 'bg-white border-l-transparent hover:bg-slate-50'}`}>
+                  <p className="font-bold text-slate-800">{p.name}</p>
+                  <p className="text-xs text-slate-500">{p.position}</p>
+                </button>
+              ))}
+            </div>
+            <div className="lg:col-span-2">
+              {selectedPlayerId ? (
+                <div className="bg-white rounded-2xl shadow-xl p-6 border animate-in fade-in slide-in-from-right-4">
+                  {(() => {
+                    const p = roster.find(pl => pl.id === selectedPlayerId)!;
+                    return (
+                      <>
+                        <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-6">
+                          <div>
+                            <h3 className="text-3xl font-black text-slate-900">{p.name}</h3>
+                            <span className="text-xs font-bold uppercase tracking-widest bg-slate-100 text-slate-500 px-3 py-1 rounded-full">{p.position}</span>
                           </div>
-                          {selectedPlayerId === player.id && <ChevronRight className="h-4 w-4 text-pool-500" />}
+                          <div className="w-full md:w-60 h-60"><SkillRadar player={p} /></div>
                         </div>
-                      </button>
-                    ))}
-                    {roster.length === 0 && <p className="text-sm text-slate-400 italic px-2">No roster data.</p>}
-                  </div>
+                        <div className="space-y-1">
+                          {SKILL_CATEGORIES_LIST.map(cat => (
+                            <div key={cat} className="flex items-center justify-between py-4 border-b border-slate-50 hover:bg-slate-50/50 px-2 rounded-lg transition-colors">
+                              <span className="text-sm font-bold text-slate-700">{cat}</span>
+                              <SkillRating current={p.skills[cat]} onChange={(val) => updateSkill(p.id, cat, val)} />
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
-
-                {/* Assessment Panel */}
-                <div className="lg:col-span-2">
-                  {selectedPlayerId ? (
-                    <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
-                      <div className="bg-gradient-to-br from-white to-pool-50/50 rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8">
-                        {(() => {
-                          const player = roster.find(p => p.id === selectedPlayerId)!;
-                          return (
-                            <>
-                              <div className="flex flex-col md:flex-row justify-between items-start mb-8">
-                                <div>
-                                  <div className="flex items-center gap-3 mb-2">
-                                     <div className={`h-12 w-12 rounded-full bg-gradient-to-br ${getAvatarGradient(player.name)} flex items-center justify-center text-white text-lg font-black shadow-md border-2 border-white`}>
-                                       {player.name.charAt(0)}
-                                     </div>
-                                     <h3 className="text-3xl font-black text-slate-900">{player.name}</h3>
-                                  </div>
-                                  <span className="inline-block bg-white border border-slate-200 text-slate-600 font-bold text-xs px-3 py-1 rounded-full uppercase tracking-wider shadow-sm ml-1">
-                                    {player.position}
-                                  </span>
-                                </div>
-                                <div className="w-full md:w-48 h-48 self-center md:self-auto mt-6 md:mt-0 -mr-4 opacity-90">
-                                  <SkillRadar player={player} />
-                                </div>
-                              </div>
-
-                              <div className="space-y-1 bg-white/60 rounded-xl p-4 border border-white/50 backdrop-blur-sm">
-                                <div className="flex justify-between items-center mb-4 border-b border-slate-200/60 pb-2">
-                                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Core Competencies</h4>
-                                   <div className="flex text-[10px] text-slate-400 uppercase font-bold space-x-4 pr-2">
-                                      <span>Poor (1)</span>
-                                      <span>Elite (5)</span>
-                                   </div>
-                                </div>
-                                
-                                {SKILL_CATEGORIES_LIST.map(category => (
-                                  <div key={category} className="flex items-center justify-between py-3 hover:bg-white rounded-lg px-2 transition-colors border-b border-transparent hover:border-slate-100 hover:shadow-sm">
-                                    <span className="text-sm font-bold text-slate-700">{category}</span>
-                                    <SkillRating 
-                                      current={player.skills[category]}
-                                      onChange={(val) => updateSkill(player.id, category, val)}
-                                    />
-                                  </div>
-                                ))}
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-
-                      {/* Custom Skills Section */}
-                      <div className="bg-gradient-to-br from-white to-purple-50 rounded-2xl shadow-lg border border-purple-100 p-6">
-                        <h4 className="flex items-center text-sm font-bold text-purple-900 uppercase tracking-wider mb-4">
-                          <Sparkles className="h-4 w-4 mr-2 text-purple-500" />
-                          Personalized Traits
-                        </h4>
-                        
-                        {(() => {
-                           const player = roster.find(p => p.id === selectedPlayerId)!;
-                           return (
-                             <div className="space-y-4">
-                                <div className="flex gap-2">
-                                  <input 
-                                    type="text" 
-                                    placeholder="Add custom skill (e.g. Leadership, Sprints)"
-                                    className="flex-1 border border-purple-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:outline-none bg-white shadow-sm"
-                                    value={newCustomSkill}
-                                    onChange={(e) => setNewCustomSkill(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') addCustomSkill(player.id, newCustomSkill, 5);
-                                    }}
-                                  />
-                                  <div className="flex gap-1">
-                                    <button 
-                                      onClick={() => addCustomSkill(player.id, newCustomSkill, 1)}
-                                      className="p-2 rounded-xl bg-white text-red-500 hover:bg-red-50 hover:text-red-600 border border-slate-200 shadow-sm transition-colors"
-                                      title="Add as Weakness"
-                                    >
-                                      <XCircle size={20} />
-                                    </button>
-                                    <button 
-                                      onClick={() => addCustomSkill(player.id, newCustomSkill, 5)}
-                                      className="p-2 rounded-xl bg-white text-green-500 hover:bg-green-50 hover:text-green-600 border border-slate-200 shadow-sm transition-colors"
-                                      title="Add as Strength"
-                                    >
-                                      <CheckCircle2 size={20} />
-                                    </button>
-                                  </div>
-                                </div>
-
-                                <div className="space-y-2">
-                                  {player.customSkills.length === 0 && (
-                                    <p className="text-purple-300 text-sm italic text-center py-4">No custom traits yet.</p>
-                                  )}
-                                  {player.customSkills.map(skill => (
-                                    <div key={skill.id} className="flex items-center justify-between p-3 bg-white rounded-xl border border-purple-100 shadow-sm">
-                                      <div className="flex items-center gap-3">
-                                        {skill.level === 5 ? (
-                                          <CheckCircle2 className="text-green-500 h-5 w-5" />
-                                        ) : skill.level === 1 ? (
-                                          <XCircle className="text-red-500 h-5 w-5" />
-                                        ) : (
-                                          <MinusCircle className="text-slate-400 h-5 w-5" />
-                                        )}
-                                        <span className="font-bold text-slate-700">{skill.name}</span>
-                                      </div>
-                                      <button 
-                                        onClick={() => removeCustomSkill(player.id, skill.id)}
-                                        className="text-slate-300 hover:text-red-500 transition-colors"
-                                      >
-                                        <Trash2 className="h-4 w-4" />
-                                      </button>
-                                    </div>
-                                  ))}
-                                </div>
-                             </div>
-                           )
-                        })()}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="bg-white/50 rounded-2xl border-2 border-slate-200 border-dashed p-12 text-center h-full flex flex-col items-center justify-center backdrop-blur-sm">
-                      <div className="bg-white p-4 rounded-full shadow-sm mb-4">
-                        <Users className="h-8 w-8 text-slate-300" />
-                      </div>
-                      <p className="text-slate-500 font-medium">Select a player from the roster to begin assessment.</p>
-                    </div>
-                  )}
-                </div>
-             </div>
+              ) : <div className="h-full flex flex-col items-center justify-center p-12 text-slate-400 bg-white/50 rounded-2xl border-2 border-dashed border-slate-200"><Users size={48} className="mb-4 opacity-20" /><p className="font-medium">Select an athlete to begin assessment</p></div>}
+            </div>
           </div>
         )}
 
-        {/* VIEW: PLANNER CONFIG */}
         {view === 'planner' && (
-          <div className="max-w-6xl mx-auto space-y-10 animate-in fade-in duration-500">
-            <div className="text-center space-y-3">
-              <h2 className="text-4xl font-black text-pool-900 tracking-tight">Mission Control</h2>
-              <p className="text-slate-500 text-lg max-w-2xl mx-auto">Select a training module below. The AI will analyze your roster's data to construct the optimal session.</p>
+          <div className="space-y-10">
+            <div className="text-center space-y-2">
+              <h2 className="text-3xl font-black text-slate-900">Mission Control</h2>
+              <p className="text-slate-500">Pick a module to generate an AI-optimized session.</p>
             </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              {/* Team Plan Card */}
-              <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-8 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group flex flex-col">
-                <div className="absolute -top-6 -right-6 w-32 h-32 bg-pool-50 rounded-full group-hover:scale-110 transition-transform duration-500"></div>
-                <div className="relative z-10 flex flex-col h-full">
-                  <div className="w-14 h-14 bg-gradient-to-br from-pool-500 to-pool-600 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-pool-200">
-                    <Users className="w-7 h-7" />
-                  </div>
-                  <h3 className="text-2xl font-bold text-slate-900 mb-3">Team Practice</h3>
-                  <p className="text-slate-500 mb-8 leading-relaxed">
-                    Create a full team practice with your players based off of their skills
-                  </p>
-                  <button
-                    onClick={() => handleGenerate('team')}
-                    disabled={isGenerating}
-                    className="mt-auto w-full bg-slate-900 hover:bg-pool-600 text-white py-4 rounded-xl font-bold transition-all shadow-md active:scale-95 flex justify-center items-center"
-                  >
-                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : 'Generate Team Plan'}
-                  </button>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <PlannerCard title="Team Practice" icon={<Users />} desc="Full team session based on roster needs" onClick={() => handleGenerate('team')} disabled={isGenerating} />
+              <PlannerCard title="Skill Focus" icon={<BrainCircuit />} desc="Targeted individual work" onClick={() => handleGenerate('individual')} disabled={isGenerating || selectedIndividualIds.length === 0} color="purple">
+                <div className="max-h-24 overflow-y-auto mb-4 border rounded-lg p-2 bg-slate-50 custom-scrollbar">
+                  {roster.map(p => (
+                    <label key={p.id} className="flex items-center space-x-2 text-xs mb-2 cursor-pointer hover:bg-white p-1 rounded transition-colors">
+                      <input type="checkbox" className="rounded text-purple-600" checked={selectedIndividualIds.includes(p.id)} onChange={() => toggleIndividualSelection(p.id)} />
+                      <span className="font-medium text-slate-600">{p.name}</span>
+                    </label>
+                  ))}
                 </div>
-              </div>
-
-              {/* Individual / Cohort Plan Card */}
-              <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-8 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group flex flex-col">
-                <div className="absolute -top-6 -right-6 w-32 h-32 bg-purple-50 rounded-full group-hover:scale-110 transition-transform duration-500"></div>
-                <div className="relative z-10 flex flex-col h-full">
-                  <div className="w-14 h-14 bg-gradient-to-br from-purple-500 to-purple-600 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-purple-200">
-                    <BrainCircuit className="w-7 h-7" />
-                  </div>
-                  <h3 className="text-2xl font-bold text-slate-900 mb-3">Skill Focus</h3>
-                  <p className="text-slate-500 mb-6 leading-relaxed">
-                    Target specific players and create focused drills for each one OR a small group based on shared needs
-                  </p>
-                  
-                  <div className="mb-6 flex-1 overflow-y-auto max-h-40 border border-slate-100 rounded-xl bg-slate-50 p-3 custom-scrollbar">
-                    <p className="text-xs font-bold text-slate-400 mb-3 uppercase px-1">Select Participants:</p>
-                    <div className="space-y-1">
-                      {roster.map(p => (
-                         <label key={p.id} className="flex items-center space-x-3 p-2 hover:bg-white rounded-lg cursor-pointer transition-colors group/item">
-                            <input 
-                              type="checkbox" 
-                              checked={selectedIndividualIds.includes(p.id)}
-                              onChange={() => toggleIndividualSelection(p.id)}
-                              className="rounded-md w-4 h-4 text-purple-600 focus:ring-purple-500 border-slate-300"
-                            />
-                            <span className="text-sm font-medium text-slate-600 group-hover/item:text-slate-900">{p.name}</span>
-                         </label>
-                      ))}
-                      {roster.length === 0 && <span className="text-xs text-slate-400 italic">No players available</span>}
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => handleGenerate('individual')}
-                    disabled={isGenerating || selectedIndividualIds.length === 0}
-                    className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 disabled:from-slate-300 disabled:to-slate-400 text-white py-4 rounded-xl font-bold transition-all shadow-md active:scale-95 flex justify-center items-center"
-                  >
-                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Build Plan (${selectedIndividualIds.length})`}
-                  </button>
+              </PlannerCard>
+              <PlannerCard title="Conditioning" icon={<Dumbbell />} desc="Pool and dryland sets" onClick={() => handleGenerate('conditioning')} disabled={isGenerating || selectedConditioningIds.length === 0} color="emerald">
+                <div className="max-h-24 overflow-y-auto mb-4 border rounded-lg p-2 bg-slate-50 custom-scrollbar">
+                  {roster.map(p => (
+                    <label key={p.id} className="flex items-center space-x-2 text-xs mb-2 cursor-pointer hover:bg-white p-1 rounded transition-colors">
+                      <input type="checkbox" className="rounded text-emerald-600" checked={selectedConditioningIds.includes(p.id)} onChange={() => toggleConditioningSelection(p.id)} />
+                      <span className="font-medium text-slate-600">{p.name}</span>
+                    </label>
+                  ))}
                 </div>
-              </div>
-
-               {/* Conditioning Plan Card */}
-               <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-8 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group flex flex-col">
-                <div className="absolute -top-6 -right-6 w-32 h-32 bg-emerald-50 rounded-full group-hover:scale-110 transition-transform duration-500"></div>
-                <div className="relative z-10 flex flex-col h-full">
-                   <div className="w-14 h-14 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-emerald-200">
-                    <Dumbbell className="w-7 h-7" />
-                  </div>
-                  <h3 className="text-2xl font-bold text-slate-900 mb-3">Conditioning</h3>
-                  <p className="text-slate-500 mb-6 leading-relaxed">
-                    High intensity physical training. Pool and Gym sets tailored to each physical weakness.
-                  </p>
-                  
-                  <div className="mb-6 flex-1 overflow-y-auto max-h-40 border border-slate-100 rounded-xl bg-slate-50 p-3 custom-scrollbar">
-                    <p className="text-xs font-bold text-slate-400 mb-3 uppercase px-1">Select Participants:</p>
-                    <div className="space-y-1">
-                      {roster.map(p => (
-                         <label key={p.id} className="flex items-center space-x-3 p-2 hover:bg-white rounded-lg cursor-pointer transition-colors group/item">
-                            <input 
-                              type="checkbox" 
-                              checked={selectedConditioningIds.includes(p.id)}
-                              onChange={() => toggleConditioningSelection(p.id)}
-                              className="rounded-md w-4 h-4 text-emerald-600 focus:ring-emerald-500 border-slate-300"
-                            />
-                            <span className="text-sm font-medium text-slate-600 group-hover/item:text-slate-900">{p.name}</span>
-                         </label>
-                      ))}
-                      {roster.length === 0 && <span className="text-xs text-slate-400 italic">No players available</span>}
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => handleGenerate('conditioning')}
-                    disabled={isGenerating || selectedConditioningIds.length === 0}
-                    className="w-full bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 disabled:from-slate-300 disabled:to-slate-400 text-white py-4 rounded-xl font-bold transition-all shadow-md active:scale-95 flex justify-center items-center"
-                  >
-                    {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : `Create Set (${selectedConditioningIds.length})`}
-                  </button>
-                </div>
-              </div>
+              </PlannerCard>
+              <PlannerCard title="AI Command" icon={<MessageSquare />} desc="Type custom requests" onClick={() => handleGenerate('custom')} disabled={isGenerating || !customPrompt.trim()} color="orange">
+                <textarea className="w-full text-xs p-3 border rounded-xl mb-4 bg-slate-50 focus:bg-white transition-all outline-none focus:ring-2 focus:ring-orange-500" rows={4} placeholder="e.g. Focus on transition speed and counter attacks..." value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} />
+              </PlannerCard>
             </div>
-
-            {generationError && (
-              <div className="bg-red-50 text-red-700 p-4 rounded-xl border border-red-200 text-sm font-medium text-center flex items-center justify-center animate-pulse">
-                <AlertCircle className="w-5 h-5 mr-2" />
-                {generationError}
-              </div>
-            )}
-            
-            {isGenerating && (
-              <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center animate-in fade-in duration-300">
-                 <div className="text-6xl animate-bounce mb-6">🤽</div>
-                 <h3 className="text-2xl font-bold text-slate-800 mb-2">Analyzing Roster Data...</h3>
-                 <p className="text-slate-500">Constructing optimized training set.</p>
-              </div>
-            )}
           </div>
         )}
 
-        {/* VIEW: RECOVERY */}
         {view === 'recovery' && (
-          <div className="max-w-2xl mx-auto space-y-6 animate-in slide-in-from-bottom-8 duration-500">
-            <div className="text-center mb-8">
-              <div className="inline-flex items-center justify-center p-4 bg-red-50 rounded-full mb-6 ring-4 ring-red-50/50 shadow-sm">
+          <div className="max-w-2xl mx-auto space-y-8 animate-in slide-in-from-bottom-8 duration-500">
+            <div className="text-center space-y-3">
+              <div className="inline-flex items-center justify-center p-4 bg-red-50 rounded-3xl mb-4 shadow-sm">
                 <Stethoscope className="h-10 w-10 text-red-500" />
               </div>
-              <h2 className="text-3xl font-black text-pool-900 tracking-tight">Injury & Recovery</h2>
-              <p className="text-slate-500 mt-2 text-lg">AI-powered rehabilitation protocols for safe return to sport.</p>
+              <h2 className="text-4xl font-black text-slate-900 tracking-tight">AI Recovery Hub</h2>
+              <p className="text-slate-500 text-lg">Specialized return-to-sport protocols designed by AI coaching.</p>
             </div>
 
-            <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8 space-y-8 relative overflow-hidden">
-               <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-red-400 to-orange-400"></div>
+            <div className="bg-white rounded-[32px] shadow-2xl border border-slate-100 p-8 space-y-8 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-3 bg-gradient-to-r from-red-500 to-orange-500"></div>
               
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wide">Athlete</label>
-                <select 
-                  className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:ring-2 focus:ring-red-500 focus:outline-none focus:bg-white transition-all font-medium text-slate-700"
-                  value={injuryPlayerId}
-                  onChange={(e) => setInjuryPlayerId(e.target.value)}
-                >
-                  <option value="">-- Select Injured Player (Optional) --</option>
-                  {roster.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wide">Diagnosis / Issue</label>
-                  <input 
-                    type="text" 
-                    placeholder="e.g. Rotator Cuff Strain"
-                    className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:ring-2 focus:ring-red-500 focus:outline-none focus:bg-white transition-all"
-                    value={injuryIssue}
-                    onChange={(e) => setInjuryIssue(e.target.value)}
-                  />
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Select Athlete</label>
+                  <select 
+                    className="w-full border border-slate-200 rounded-2xl px-6 py-4 bg-slate-50 focus:ring-4 focus:ring-red-500/10 focus:bg-white outline-none transition-all font-bold text-slate-700"
+                    value={injuryPlayerId}
+                    onChange={(e) => setInjuryPlayerId(e.target.value)}
+                  >
+                    <option value="">-- Manual/Unnamed Protocol --</option>
+                    {roster.map(p => <option key={p.id} value={p.id}>{p.name} ({p.position})</option>)}
+                  </select>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wide">Location</label>
-                  <input 
-                    type="text" 
-                    placeholder="e.g. Right Shoulder"
-                    className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:ring-2 focus:ring-red-500 focus:outline-none focus:bg-white transition-all"
-                    value={injuryLocation}
-                    onChange={(e) => setInjuryLocation(e.target.value)}
-                  />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Injury / Diagnosis</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Swimmers Shoulder"
+                      className="w-full border border-slate-200 rounded-2xl px-6 py-4 bg-slate-50 focus:ring-4 focus:ring-red-500/10 focus:bg-white outline-none transition-all font-medium"
+                      value={injuryIssue}
+                      onChange={(e) => setInjuryIssue(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Specific Location</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Right Rotator Cuff"
+                      className="w-full border border-slate-200 rounded-2xl px-6 py-4 bg-slate-50 focus:ring-4 focus:ring-red-500/10 focus:bg-white outline-none transition-all font-medium"
+                      value={injuryLocation}
+                      onChange={(e) => setInjuryLocation(e.target.value)}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                 <div className="flex justify-between items-end mb-4">
-                    <label className="block text-sm font-bold text-slate-700 uppercase tracking-wide">Pain Severity</label>
-                    <span className={`text-lg font-black px-3 py-1 rounded-lg ${
-                      injurySeverity <= 3 ? 'bg-green-100 text-green-700' :
-                      injurySeverity <= 7 ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-red-100 text-red-700'
+                <div className="space-y-4 pt-4">
+                  <div className="flex justify-between items-center mb-2 px-1">
+                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Pain Severity</label>
+                    <span className={`text-xl font-black px-4 py-1.5 rounded-xl shadow-sm ${
+                      injurySeverity <= 3 ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
+                      injurySeverity <= 7 ? 'bg-amber-50 text-amber-600 border border-amber-100' :
+                      'bg-red-50 text-red-600 border border-red-100'
                     }`}>
                       {injurySeverity} / 10
                     </span>
-                 </div>
-                 <input 
+                  </div>
+                  <input 
                     type="range" 
                     min="1" 
                     max="10" 
                     step="1"
                     value={injurySeverity}
                     onChange={(e) => setInjurySeverity(parseInt(e.target.value))}
-                    className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-red-500"
-                 />
-                 <div className="flex justify-between text-xs text-slate-400 mt-2 font-medium uppercase">
-                    <span>Mild Discomfort</span>
+                    className="w-full h-3 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-red-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-400 font-black uppercase tracking-widest px-1">
+                    <span>Mild</span>
                     <span>Moderate</span>
-                    <span>Severe Pain</span>
-                 </div>
+                    <span>Severe</span>
+                  </div>
+                </div>
               </div>
 
-              <div className="pt-2">
+              <div className="pt-4">
                 <button
                   onClick={() => handleGenerate('recovery')}
                   disabled={isGenerating || !injuryIssue.trim() || !injuryLocation.trim()}
-                  className="w-full bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-700 hover:to-orange-700 disabled:from-slate-300 disabled:to-slate-400 text-white py-4 rounded-xl font-bold transition-all shadow-lg active:scale-95 flex justify-center items-center"
+                  className="w-full bg-slate-900 hover:bg-red-600 text-white py-5 rounded-2xl font-black uppercase tracking-widest text-sm transition-all shadow-2xl active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50"
                 >
-                  {isGenerating ? <Activity className="animate-spin h-5 w-5" /> : 'Generate Recovery Protocol'}
+                  {isGenerating ? <Activity className="animate-spin" /> : <Stethoscope />} 
+                  Generate AI Recovery Protocol
                 </button>
               </div>
             </div>
+          </div>
+        )}
 
-            {generationError && (
-              <div className="bg-red-50 text-red-700 p-4 rounded-xl border border-red-200 text-sm text-center">
-                {generationError}
+        {view === 'results' && practicePlan && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8">
+            <div className="bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-100 flex flex-col">
+              <div className={`p-10 text-white relative ${practicePlan.type === 'conditioning' ? 'bg-emerald-600' : practicePlan.type === 'individual' ? 'bg-purple-600' : practicePlan.type === 'custom' ? 'bg-orange-600' : practicePlan.type === 'recovery' ? 'bg-red-600' : 'bg-pool-600'}`}>
+                <div className="relative z-10">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="bg-white/20 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">{practicePlan.type}</span>
+                    <span className="text-white/60 text-xs font-bold">{new Date().toLocaleDateString()}</span>
+                  </div>
+                  <h1 className="text-4xl font-black mb-3 tracking-tight">{practicePlan.title}</h1>
+                  <p className="font-medium text-lg opacity-90 max-w-2xl leading-relaxed">{practicePlan.summary}</p>
+                </div>
+                <div className="absolute top-0 right-0 p-8 opacity-20">
+                  {practicePlan.type === 'recovery' ? <Stethoscope size={120} /> : <Zap size={120} />}
+                </div>
+              </div>
+              
+              <div className="p-10 space-y-6 bg-slate-50/50 flex-1 border-b border-slate-100">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-6">Execution Plan</h3>
+                {practicePlan.drills.map((d, i) => <DrillCard key={i} drill={d} index={i} />)}
+              </div>
+              
+              {/* Coach Chat Corner */}
+              <div className="bg-white">
+                <div className="px-10 py-6 bg-slate-50 border-b flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-pool-100 text-pool-600 rounded-xl"><MessageSquare size={20} /></div>
+                    <div>
+                      <h3 className="font-black text-slate-800 leading-none">Coach's Corner</h3>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter mt-1">Interactive session support</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => handleRequestSuggestion('warmup')} className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-[10px] font-bold text-slate-500 hover:border-pool-500 hover:text-pool-600 transition-all shadow-sm">Suggest Warmup</button>
+                    <button onClick={() => handleRequestSuggestion('finisher')} className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-[10px] font-bold text-slate-500 hover:border-pool-500 hover:text-pool-600 transition-all shadow-sm">Add Finisher</button>
+                    <button onClick={() => handleRequestSuggestion('extra')} className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-[10px] font-bold text-slate-500 hover:border-pool-500 hover:text-pool-600 transition-all shadow-sm">Give Me One More</button>
+                  </div>
+                </div>
+                
+                <div className="p-10 max-h-[600px] overflow-y-auto space-y-6 flex flex-col custom-scrollbar bg-white">
+                  {chatHistory.length === 0 && (
+                    <div className="text-center py-12 bg-slate-50/50 rounded-3xl border border-dashed border-slate-200">
+                      <Sparkles className="h-10 w-10 text-slate-300 mx-auto mb-3" />
+                      <p className="text-sm text-slate-400 font-medium italic">"How do I correctly perform the eggbeater?" or "Suggest a warmup for this plan."</p>
+                    </div>
+                  )}
+                  {chatHistory.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] p-6 rounded-3xl shadow-lg border transition-all ${
+                        msg.role === 'user' ? 'bg-pool-600 text-white rounded-tr-none border-pool-500' : 'bg-white text-slate-800 rounded-tl-none border-slate-100'
+                      }`}>
+                        <p className="whitespace-pre-wrap leading-relaxed font-medium">{msg.text}</p>
+                        
+                        {msg.suggestedDrill && (
+                          <div className={`mt-6 p-5 rounded-2xl border-2 border-dashed flex flex-col gap-4 transition-all ${msg.addedToPlan ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                            <div className="flex items-center justify-between">
+                              <h4 className="font-black text-slate-900">{msg.suggestedDrill.name}</h4>
+                              <span className="text-[10px] font-black bg-pool-100 text-pool-600 px-2 py-1 rounded uppercase tracking-widest">{msg.suggestedDrill.duration}</span>
+                            </div>
+                            <p className="text-xs text-slate-500 line-clamp-2">{msg.suggestedDrill.description}</p>
+                            <div className="flex gap-2">
+                              {!msg.addedToPlan ? (
+                                <button 
+                                  onClick={() => handleAddDrillToPlan(i)}
+                                  className="flex-1 bg-pool-600 text-white py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-pool-700 shadow-md active:scale-95 transition-all"
+                                >
+                                  <Plus size={14} /> Add to Session
+                                </button>
+                              ) : (
+                                <div className="flex-1 bg-emerald-100 text-emerald-700 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2">
+                                  <Check size={14} /> Added to Plan
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {isAsking && !chatHistory[chatHistory.length - 1]?.suggestedDrill && (
+                    <div className="flex justify-start">
+                      <div className="bg-slate-100 p-6 rounded-3xl rounded-tl-none animate-pulse flex items-center gap-1.5 shadow-sm border border-slate-200">
+                        <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></div>
+                        <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                        <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                
+                <div className="px-10 pb-10 bg-white border-t-0 flex gap-3 pt-6">
+                  <div className="flex-1 relative">
+                    <input 
+                      type="text" 
+                      placeholder="Ask for clarification or extra drills..." 
+                      className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 text-sm font-medium focus:ring-4 focus:ring-pool-500/10 focus:bg-white outline-none transition-all shadow-inner pr-14"
+                      value={currentQuestion}
+                      onChange={(e) => setCurrentQuestion(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAskCoach()}
+                    />
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300"><MessageSquare size={18} /></div>
+                  </div>
+                  <button 
+                    onClick={handleAskCoach}
+                    disabled={isAsking || !currentQuestion.trim()}
+                    className="p-4 bg-pool-600 hover:bg-pool-700 disabled:bg-slate-300 text-white rounded-2xl transition-all shadow-xl active:scale-95 flex items-center justify-center shrink-0"
+                  >
+                    <Send size={24} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="px-10 py-8 flex justify-between bg-slate-50 border-t items-center">
+                <button onClick={() => window.print()} className="flex items-center text-slate-500 font-black text-xs uppercase tracking-widest px-6 py-3 hover:bg-white rounded-2xl transition-all border border-transparent hover:border-slate-200 shadow-sm hover:shadow-md">
+                  <ClipboardList className="mr-3 h-5 w-5" /> Print Layout
+                </button>
+                <button onClick={saveCurrentPlan} className="bg-slate-900 text-white px-10 py-4 rounded-2xl font-black text-sm uppercase tracking-widest flex items-center hover:bg-pool-600 transition-all shadow-xl hover:shadow-pool-200 active:scale-95">
+                  <Save className="mr-3 h-5 w-5" /> Archive Plan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {view === 'plans' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+            {savedPlans.map((p, i) => (
+              <div key={i} onClick={() => { setPracticePlan(p); setView('results'); }} className="bg-white p-8 rounded-3xl shadow-xl border border-slate-100 hover:shadow-2xl cursor-pointer transition-all border-t-8 border-t-pool-500 group relative overflow-hidden">
+                <div className="absolute -right-8 -bottom-8 text-slate-50 opacity-10 group-hover:scale-110 transition-transform"><Calendar size={120} /></div>
+                <div className="relative z-10">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest bg-pool-50 text-pool-600 px-2 py-0.5 rounded-full">{p.type}</span>
+                  </div>
+                  <h3 className="font-black text-2xl text-slate-800 mb-3 group-hover:text-pool-600 transition-colors">{p.title}</h3>
+                  <p className="text-slate-500 text-sm line-clamp-3 leading-relaxed mb-6 font-medium">{p.summary}</p>
+                  <div className="pt-6 border-t border-slate-50 flex justify-between items-center text-xs font-black uppercase tracking-widest text-slate-400">
+                    <span className="flex items-center gap-2"><ClipboardList size={14} /> {p.drills.length} Drills</span>
+                    <span className="text-pool-600 opacity-0 group-hover:opacity-100 transition-all flex items-center gap-1">Open <ChevronRight size={14} /></span>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {savedPlans.length === 0 && (
+              <div className="col-span-full flex flex-col items-center justify-center py-32 text-slate-400 bg-white rounded-3xl border-2 border-dashed border-slate-200">
+                 <FolderOpen size={64} className="mb-6 opacity-20" />
+                 <h3 className="text-xl font-bold text-slate-600 mb-2">No Archived Plans</h3>
+                 <p className="max-w-xs text-center text-sm">Generated plans will appear here after you save them from the results view.</p>
               </div>
             )}
           </div>
         )}
-
-        {/* VIEW: RESULTS */}
-        {view === 'results' && practicePlan && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-500">
-            <button 
-              onClick={() => setView(practicePlan.type === 'recovery' ? 'recovery' : 'planner')}
-              className="group text-slate-500 hover:text-pool-600 text-sm font-bold flex items-center mb-4 transition-colors"
-            >
-              <div className="p-1 rounded-full bg-slate-100 group-hover:bg-pool-100 mr-2 transition-colors">
-                 <ChevronRight className="h-4 w-4 rotate-180" />
-              </div>
-              Back to {practicePlan.type === 'recovery' ? 'Recovery' : 'Planner'}
-            </button>
-
-            <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden">
-              <div className={`px-8 py-10 text-white relative overflow-hidden ${
-                practicePlan.type === 'recovery' ? 'bg-gradient-to-br from-red-600 to-orange-600' : 
-                practicePlan.type === 'conditioning' ? 'bg-gradient-to-br from-emerald-600 to-teal-600' :
-                practicePlan.type === 'individual' ? 'bg-gradient-to-br from-purple-600 to-indigo-600' :
-                'bg-gradient-to-br from-pool-600 to-sky-700'
-              }`}>
-                <div className="relative z-10">
-                   <div className="flex flex-wrap items-center gap-3 mb-4">
-                     <span className="bg-white/20 backdrop-blur-md px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider border border-white/10">
-                        {practicePlan.type}
-                     </span>
-                     {practicePlan.createdAt && (
-                       <span className="text-white/60 text-xs font-medium flex items-center">
-                         <Calendar className="h-3 w-3 mr-1" /> {new Date(practicePlan.createdAt).toLocaleDateString()}
-                       </span>
-                     )}
-                   </div>
-                   <div className="flex items-start gap-4 mb-4">
-                     {practicePlan.type === 'recovery' && <div className="p-3 bg-white/10 rounded-xl"><Stethoscope className="h-8 w-8 text-white" /></div>}
-                     <h1 className="text-3xl md:text-4xl font-black tracking-tight leading-tight">{practicePlan.title}</h1>
-                   </div>
-                   <p className="text-white/90 text-lg leading-relaxed max-w-3xl font-medium">{practicePlan.summary}</p>
-                   
-                   {practicePlan.participants && practicePlan.participants.length > 0 && (
-                      <div className="mt-6 flex flex-wrap gap-2">
-                        {practicePlan.participants.map((p, i) => (
-                          <span key={i} className="text-xs font-bold bg-black/20 px-2 py-1 rounded text-white/80">
-                            {p}
-                          </span>
-                        ))}
-                      </div>
-                   )}
-                </div>
-                {/* Decorative Pattern Overlay */}
-                <div className="absolute right-0 top-0 h-full w-1/2 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] mix-blend-overlay"></div>
-                <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
-              </div>
-
-              <div className="p-8 bg-slate-50/50 border-b border-slate-200">
-                <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 flex items-center">
-                  <span className="w-1.5 h-1.5 bg-pool-500 rounded-full mr-2"></span>
-                  Session Plan
-                </h3>
-                <div className="space-y-4">
-                  {practicePlan.drills.map((drill, idx) => (
-                    <DrillCard key={idx} drill={drill} index={idx} />
-                  ))}
-                </div>
-              </div>
-              
-              <div className="p-6 flex justify-between bg-white items-center">
-                <button 
-                   onClick={() => window.print()}
-                   className="flex items-center text-slate-500 hover:text-slate-800 font-bold px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors"
-                >
-                  <ClipboardList className="mr-2 h-5 w-5" /> Print
-                </button>
-                <button 
-                  onClick={saveCurrentPlan}
-                  className="bg-slate-900 hover:bg-pool-600 text-white px-6 py-3 rounded-xl font-bold flex items-center shadow-lg hover:shadow-xl transition-all active:scale-95"
-                >
-                  <Save className="mr-2 h-5 w-5" /> Save Plan
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* VIEW: SAVED PLANS */}
-        {view === 'plans' && (
-          <div className="space-y-8 animate-in fade-in duration-300">
-             <div className="flex items-center justify-between">
-                <h2 className="text-3xl font-black text-pool-900 flex items-center tracking-tight">
-                  <span className="bg-pool-100 text-pool-700 p-2 rounded-xl mr-3">
-                    <FolderOpen className="h-7 w-7" />
-                  </span>
-                  Plan Library
-                </h2>
-                <span className="text-sm font-bold text-slate-500 bg-white px-4 py-2 rounded-full border border-slate-200 shadow-sm">
-                  {savedPlans.length} Files
-                </span>
-             </div>
-
-             {savedPlans.length === 0 ? (
-               <div className="bg-white rounded-2xl border-2 border-slate-200 border-dashed p-16 text-center max-w-2xl mx-auto">
-                 <div className="bg-slate-50 inline-block p-6 rounded-full mb-6 border border-slate-100">
-                   <FolderOpen className="h-12 w-12 text-slate-300" />
-                 </div>
-                 <h3 className="text-xl font-bold text-pool-900 mb-2">Library Empty</h3>
-                 <p className="text-slate-500 mb-8 max-w-sm mx-auto">Generated plans can be saved here for future reference. Create your first plan to get started.</p>
-                 <button 
-                   onClick={() => setView('planner')}
-                   className="bg-pool-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-pool-700 transition-colors shadow-lg"
-                 >
-                   Go to Planner
-                 </button>
-               </div>
-             ) : (
-               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                 {savedPlans.map((plan, idx) => (
-                   <div 
-                     key={idx} 
-                     className={`bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col group border-t-4 ${
-                        plan.type === 'conditioning' ? 'border-t-emerald-500' : 
-                        plan.type === 'individual' ? 'border-t-purple-500' : 
-                        plan.type === 'recovery' ? 'border-t-red-500' :
-                        'border-t-pool-500'
-                     }`}
-                     onClick={() => {
-                       setPracticePlan(plan);
-                       setView('results');
-                     }}
-                   >
-                     <div className="p-6 flex-1">
-                       <div className="flex items-start justify-between mb-4">
-                         <div className={`text-[10px] font-black px-2 py-1 rounded-md uppercase tracking-widest ${
-                           plan.type === 'conditioning' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 
-                           plan.type === 'individual' ? 'bg-purple-50 text-purple-600 border border-purple-100' : 
-                           plan.type === 'recovery' ? 'bg-red-50 text-red-600 border border-red-100' :
-                           'bg-pool-50 text-pool-600 border border-pool-100'
-                         }`}>
-                           {plan.type || 'Practice'}
-                         </div>
-                         {plan.createdAt && (
-                           <div className="text-xs text-slate-400 font-medium flex items-center bg-slate-50 px-2 py-1 rounded-full border border-slate-100">
-                             {new Date(plan.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                           </div>
-                         )}
-                       </div>
-                       <h3 className="font-bold text-slate-800 text-xl mb-3 line-clamp-2 group-hover:text-pool-600 transition-colors">{plan.title}</h3>
-                       <p className="text-slate-500 text-sm line-clamp-3 leading-relaxed">{plan.summary}</p>
-                     </div>
-                     <div className="bg-slate-50/50 px-6 py-4 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-slate-500">
-                       <span className="flex items-center"><ClipboardList className="w-3 h-3 mr-1" /> {plan.drills.length} Drills</span>
-                       <span className="flex items-center text-pool-600 group-hover:underline">
-                         Open File <ChevronRight className="h-3 w-3 ml-1" />
-                       </span>
-                     </div>
-                   </div>
-                 ))}
-               </div>
-             )}
-          </div>
-        )}
       </main>
+
+      {isGenerating && (
+        <div className="fixed inset-0 bg-white/90 backdrop-blur-md z-[100] flex flex-col items-center justify-center animate-in fade-in duration-500">
+           <div className="w-24 h-24 relative mb-8">
+              <div className="absolute inset-0 bg-pool-500 rounded-full animate-ping opacity-20"></div>
+              <div className="absolute inset-4 bg-pool-600 rounded-full flex items-center justify-center text-4xl shadow-2xl z-10 animate-bounce">🤽</div>
+           </div>
+           <h3 className="text-3xl font-black text-slate-900 mb-2 tracking-tight">Coach is Strategizing...</h3>
+           <p className="text-slate-500 font-bold uppercase tracking-widest text-xs animate-pulse">Analyzing roster strengths & weaknesses</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PlannerCard = ({ title, icon, desc, onClick, disabled, children, color = 'pool' }: any) => {
+  const colorMap = {
+    pool: 'bg-pool-500 shadow-pool-200',
+    purple: 'bg-purple-500 shadow-purple-200',
+    emerald: 'bg-emerald-500 shadow-emerald-200',
+    orange: 'bg-orange-500 shadow-orange-200',
+  };
+  
+  return (
+    <div className={`bg-white rounded-3xl shadow-xl p-8 border border-slate-100 flex flex-col transition-all duration-300 hover:shadow-2xl hover:-translate-y-2 relative overflow-hidden group`}>
+      <div className={`w-14 h-14 ${(colorMap as any)[color]} rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg group-hover:scale-110 transition-transform`}>{icon}</div>
+      <h3 className="text-2xl font-black mb-3 text-slate-900 tracking-tight">{title}</h3>
+      <p className="text-slate-500 text-sm mb-6 flex-1 leading-relaxed font-medium">{desc}</p>
+      {children}
+      <button onClick={onClick} disabled={disabled} className="w-full bg-slate-900 hover:bg-pool-600 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all disabled:opacity-50 shadow-xl active:scale-95">Generate Session</button>
     </div>
   );
 };
 
 const DrillCard: React.FC<{ drill: Drill, index: number }> = ({ drill, index }) => {
   const [isOpen, setIsOpen] = useState(false);
-
-  // Difficulty Colors
-  const diffColor = {
-    'Beginner': 'bg-green-100 text-green-700 border-green-200',
-    'Intermediate': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Advanced': 'bg-red-100 text-red-700 border-red-200',
-  }[drill.difficulty] || 'bg-slate-100 text-slate-700';
-
-  // Category Colors
-  const catColor = drill.category === 'Weight Room' 
-    ? 'bg-slate-100 text-slate-600 border-slate-200' 
-    : drill.category === 'Pool Conditioning' || drill.category === 'Pool Recovery'
-      ? 'bg-cyan-100 text-cyan-600 border-cyan-200'
-      : drill.category === 'Rehab'
-        ? 'bg-orange-100 text-orange-600 border-orange-200'
-      : 'bg-blue-100 text-blue-600 border-blue-200';
-
   return (
-    <div className={`bg-white border rounded-xl transition-all duration-300 ${isOpen ? 'shadow-lg border-pool-300 ring-1 ring-pool-100' : 'shadow-sm border-slate-200 hover:border-pool-300'}`}>
-      <div 
-        className={`flex flex-col md:flex-row md:items-center justify-between p-5 cursor-pointer rounded-t-xl transition-colors ${isOpen ? 'bg-pool-50/50' : 'hover:bg-slate-50/50'}`}
-        onClick={() => setIsOpen(!isOpen)}
-      >
-        <div className="flex items-start space-x-5">
-          <div className={`text-sm font-black h-8 w-8 rounded-lg flex items-center justify-center shrink-0 mt-1 shadow-sm transition-colors ${isOpen ? 'bg-pool-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-            {index + 1}
-          </div>
+    <div className={`bg-white border rounded-2xl overflow-hidden transition-all duration-300 ${isOpen ? 'ring-4 ring-pool-100 shadow-2xl border-pool-200' : 'hover:border-pool-300 shadow-sm border-slate-200'}`}>
+      <div className="p-6 flex items-center justify-between cursor-pointer group" onClick={() => setIsOpen(!isOpen)}>
+        <div className="flex items-center gap-6">
+          <div className="bg-slate-100 text-slate-400 group-hover:bg-pool-600 group-hover:text-white w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm transition-all shadow-inner">{index + 1}</div>
           <div>
-            <h4 className={`font-bold text-lg transition-colors ${isOpen ? 'text-pool-800' : 'text-slate-800'}`}>{drill.name}</h4>
-            <div className="flex flex-wrap gap-2 mt-2">
-              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md bg-white text-slate-500 border border-slate-200 flex items-center shadow-sm">
-                ⏱ {drill.duration}
-              </span>
-              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border shadow-sm ${catColor}`}>
-                {drill.category}
-              </span>
-              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border shadow-sm ${diffColor}`}>
-                {drill.difficulty}
-              </span>
+            <h4 className="font-black text-slate-800 text-lg group-hover:text-pool-700 transition-colors">{drill.name}</h4>
+            <div className="flex gap-2 mt-2">
+              <span className="text-[10px] font-black bg-slate-50 text-slate-500 px-3 py-1 rounded-lg border border-slate-100 shadow-sm flex items-center gap-1"><Calendar size={10} /> {drill.duration}</span>
+              <span className="text-[10px] font-black bg-pool-50 text-pool-600 px-3 py-1 rounded-lg border border-pool-100 uppercase tracking-widest shadow-sm">{drill.category}</span>
             </div>
           </div>
         </div>
-        <div className="mt-4 md:mt-0 md:ml-4 text-slate-300 self-end md:self-center">
-           <div className={`p-2 rounded-full transition-all ${isOpen ? 'bg-white text-pool-600 rotate-180 shadow-sm' : 'hover:bg-white hover:text-slate-400'}`}>
-             <ChevronDown size={20} />
-           </div>
-        </div>
+        <div className={`p-2 rounded-full transition-all ${isOpen ? 'bg-pool-100 text-pool-600 rotate-180' : 'text-slate-300'}`}><ChevronDown size={24} /></div>
       </div>
-      
       {isOpen && (
-        <div className="px-5 pb-6 md:pl-18 pr-6 border-t border-pool-100">
-           <div className="pt-4 grid md:grid-cols-3 gap-8">
-              <div className="md:col-span-2 space-y-4">
-                <div>
-                    <h5 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center">
-                    <span className="w-1.5 h-1.5 bg-pool-400 rounded-full mr-2"></span> Instructions
-                    </h5>
-                    <p className="text-slate-700 whitespace-pre-wrap leading-relaxed text-sm md:text-base bg-slate-50 p-4 rounded-xl border border-slate-100">{drill.description}</p>
-                </div>
-              </div>
-              <div className="bg-gradient-to-br from-pool-50 to-white p-5 rounded-xl border border-pool-100 h-fit shadow-sm">
-                <h5 className="text-xs font-bold text-pool-400 uppercase tracking-widest mb-2 flex items-center">
-                  <span className="w-1.5 h-1.5 bg-pool-500 rounded-full mr-2"></span> Purpose
-                </h5>
-                <p className="text-sm text-pool-900 font-medium italic">"{drill.focus}"</p>
-              </div>
-           </div>
+        <div className="px-6 pb-8 pt-2 bg-slate-50/30 border-t border-slate-100 animate-in slide-in-from-top-2">
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-inner mb-6">
+            <h5 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2"><ClipboardList size={12} /> Instructions</h5>
+            <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap font-medium">{drill.description}</p>
+          </div>
+          <div className="bg-gradient-to-br from-pool-600 to-pool-700 p-6 rounded-2xl shadow-xl relative overflow-hidden">
+            <div className="relative z-10">
+              <h5 className="text-[10px] font-black uppercase tracking-widest text-white/60 mb-2">Primary Objective</h5>
+              <p className="text-sm font-black text-white italic tracking-tight">"{drill.focus}"</p>
+            </div>
+            <div className="absolute top-0 right-0 p-4 text-white/10 rotate-12"><Zap size={48} /></div>
+          </div>
         </div>
       )}
     </div>

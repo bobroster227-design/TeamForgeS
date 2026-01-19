@@ -39,7 +39,7 @@ export interface Drill {
 export interface PracticePlan {
   id?: string;
   createdAt?: number;
-  type?: 'team' | 'individual' | 'conditioning' | 'recovery';
+  type?: 'team' | 'individual' | 'conditioning' | 'recovery' | 'custom';
   participants?: string[];
   title: string;
   summary: string;

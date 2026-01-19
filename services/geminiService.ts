@@ -1,12 +1,12 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Player, PracticePlan } from "../types";
+import { Player, PracticePlan, Drill } from "../types";
 
 const drillSchema: Schema = {
   type: Type.OBJECT,
   properties: {
     name: { type: Type.STRING, description: "Name of the drill or exercise" },
     duration: { type: Type.STRING, description: "Duration or Sets/Reps (e.g. '10 mins' or '3x10 reps')" },
-    category: { type: Type.STRING, description: "Category: 'Pool Conditioning', 'Weight Room', 'Rehab', or Skill Category" },
+    category: { type: Type.STRING, description: "Category: 'Pool Conditioning', 'Dryland / Weights', 'Drill', 'Tactic', etc." },
     description: { type: Type.STRING, description: "Step-by-step instructions" },
     focus: { type: Type.STRING, description: "What specifically this improves" },
     difficulty: { type: Type.STRING, enum: ["Beginner", "Intermediate", "Advanced"] },
@@ -29,123 +29,50 @@ const planSchema: Schema = {
 
 export const generatePracticePlan = async (
   players: Player[],
-  mode: 'team' | 'individual' | 'conditioning' | 'recovery',
+  mode: 'team' | 'individual' | 'conditioning' | 'recovery' | 'custom',
   focusPlayers?: Player[],
-  injuryContext?: string,
+  contextString?: string,
   severity?: number
 ): Promise<PracticePlan | null> => {
   try {
     const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      console.error("API Key not found");
-      return null;
-    }
+    if (!apiKey) return null;
 
     const ai = new GoogleGenAI({ apiKey });
-    
-    let systemInstruction = `You are a world-class Water Polo coach designed to create high-performance practice plans.`;
+    let systemInstruction = `You are a world-class Water Polo coach designed to create high-performance practice plans. You have access to a roster of players with skill ratings from 1 (poor) to 5 (elite).`;
 
     const serializedRoster = JSON.stringify(players.map(p => ({
       name: p.name,
       position: p.position,
-      skills: p.skills, // This will now send 1-5 or N/A
+      skills: p.skills,
       custom_skills: p.customSkills
     })), null, 2);
 
     let prompt = "";
 
-    if (mode === 'recovery' && injuryContext) {
+    if (mode === 'custom' && contextString) {
+      prompt = `
+        The coach has given a specific command: "${contextString}"
+        Using the following team roster as context, generate a training session that follows the coach's command exactly.
+        Team Roster Data: ${serializedRoster}
+        Requirements:
+        1. Prioritize the specific drills or focus areas requested in the command.
+        2. Adjust the difficulty of the drills based on the team's skill levels.
+        3. Provide a creative title and summary for this custom session.
+      `;
+    } else if (mode === 'recovery' && contextString) {
       const playerName = focusPlayers && focusPlayers.length > 0 ? focusPlayers[0].name : "the athlete";
-      const severityText = severity ? `Current Pain Severity: ${severity}/10` : "Severity: Unknown";
-      
-      prompt = `
-        Create a comprehensive Recovery and Rehabilitation Plan for ${playerName}.
-        
-        Injury Details & Location: ${injuryContext}
-        ${severityText}
-        
-        The goal is to facilitate healing, maintain mobility, and safely return to sport.
-        Acts as a specialized Physical Therapist and Water Polo Coach.
-
-        Logic based on Severity:
-        - If severity is High (7-10): Focus on absolute rest, icing, protection, and extremely gentle passive range of motion if safe. No load.
-        - If severity is Medium (4-6): Focus on active mobility, light isometric loading, and water treading (if safe).
-        - If severity is Low (1-3): Focus on progressive strengthening, dynamic stability, and return-to-sport drills.
-        
-        The plan MUST be divided into logical sections (e.g., Mobility, Activation, Water Work):
-        1. **Mobility/Stretching**: Gentle range of motion exercises.
-        2. **Rehab/Strengthening**: Specific dryland exercises to strengthen the injured area (if safe) or surrounding muscles.
-        3. **Water Work (if applicable)**: Low-impact pool movements or modified swimming that avoids aggravating the injury.
-        4. **Prehab**: Exercises to prevent future recurrence.
-        
-        Use 'Rehab', 'Mobility', or 'Pool Recovery' for the category field.
-        Be specific about sets, reps, and precautions.
-      `;
-
+      prompt = `Create a Recovery plan for ${playerName}. Issue: ${contextString}. Severity: ${severity}/10. Use categories: 'Rehab', 'Mobility', or 'Pool Recovery'.`;
     } else if (mode === 'conditioning' && focusPlayers && focusPlayers.length > 0) {
-      const names = focusPlayers.map(p => p.name).join(', ');
-      
-      const detailedProfiles = focusPlayers.map(p => ({
-        name: p.name,
-        skills: p.skills,
-        custom: p.customSkills
-      }));
-
-      prompt = `
-        Create a high-intensity Conditioning Set for the following players: ${names}.
-        
-        Detailed Player Profiles (Skills rated 1-5):
-        ${JSON.stringify(detailedProfiles, null, 2)}
-
-        The goal is to physically strengthen these players. Analyze their collective weaknesses. 
-        If specific players have specific physical deficits (e.g., weak legs vs weak shoulders), try to include exercises that benefit them.
-        
-        The plan MUST be divided into two distinct sections (mix the drills in the list but categorize them clearly):
-        1. **Pool Conditioning**: Swimming sets, leg work (eggbeater), and water resistance drills.
-        2. **Weight Room / Dryland**: Strength training, core work, and mobility exercises suitable for water polo.
-
-        Use the 'category' field in the JSON to specify 'Pool Conditioning' or 'Weight Room'.
-        For 'duration', use Reps/Sets for weights (e.g., "3x10") and Time/Distance for swimming (e.g., "10 mins" or "500 yards").
-      `;
-
+      prompt = `Create conditioning sets for ${focusPlayers.map(p => p.name).join(', ')}. Split into exactly 'Pool Conditioning' and 'Dryland / Weights'.`;
     } else if (mode === 'individual' && focusPlayers && focusPlayers.length > 0) {
-      const names = focusPlayers.map(p => p.name).join(', ');
-      
-      const detailedProfiles = focusPlayers.map(p => ({
-        name: p.name,
-        position: p.position,
-        skills: p.skills,
-        custom: p.customSkills
-      }));
-      
-      prompt = `
-        Create a personalized small-group practice plan (1 hour) for the following players: ${names}.
-        
-        Player Profiles (Skills rated 1-5):
-        ${JSON.stringify(detailedProfiles, null, 2)}
-
-        Focus heavily on improving the lower-rated areas (1-2) identified in these profiles.
-        If they share weaknesses, focus on those. If they have complementary strengths, use them in drills (e.g., a good passer working with a good shooter).
-        
-        Since this is a group of ${focusPlayers.length} specific players, ensure the drills allow them to work together.
-        For example, if one is a goalie and one is a shooter, include shooting drills. If both are drivers, include driving/passing drills.
-      `;
+      prompt = `Create a personalized practice plan for ${focusPlayers.map(p => p.name).join(', ')} based on their profiles.`;
     } else {
-      prompt = `
-        Create a 2-hour TEAM practice plan for the following roster.
-        
-        Roster Data (Skills rated 1-5):
-        ${serializedRoster}
-
-        Analyze the collective weaknesses of the team based on the 1-5 ratings (1 is worst, 5 is best). 
-        If many players are weak in a specific area (e.g., Defense), prioritize drills for that.
-        Pay attention to custom skills marked as low level for potential specialized improvement drills.
-        Include a mix of warm-up, skill building, and scrimmaging components.
-      `;
+      prompt = `Create a 2-hour TEAM practice plan for this roster: ${serializedRoster}`;
     }
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
         systemInstruction: systemInstruction,
@@ -154,13 +81,52 @@ export const generatePracticePlan = async (
       },
     });
 
-    const text = response.text;
-    if (!text) return null;
-
-    return JSON.parse(text) as PracticePlan;
-
+    return JSON.parse(response.text) as PracticePlan;
   } catch (error) {
     console.error("Error generating plan:", error);
+    return null;
+  }
+};
+
+export const askCoachQuestion = async (plan: PracticePlan, question: string): Promise<string> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `
+        You are the Water Polo head coach. You just generated this practice plan: ${JSON.stringify(plan)}
+        The athlete/coach has a question: "${question}"
+        Provide a detailed, helpful explanation. If they ask 'what is [drill]' or 'how to do [drill]', explain the technique clearly. 
+        Keep the tone professional yet encouraging.
+      `,
+    });
+    return response.text || "I'm not sure, let's stick to the plan!";
+  } catch (err) {
+    return "Error communicating with the coach.";
+  }
+};
+
+export const generateAdditionalDrill = async (plan: PracticePlan, type: 'warmup' | 'finisher' | 'skill' | 'extra'): Promise<Drill | null> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const prompt = `
+      You are the Water Polo head coach. Current plan: ${JSON.stringify(plan)}
+      The user requested an additional ${type} exercise that fits perfectly with this specific session.
+      Generate ONE high-quality drill in JSON format that matches the intensity and goal of the current plan.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: drillSchema,
+      },
+    });
+
+    return JSON.parse(response.text) as Drill;
+  } catch (err) {
+    console.error("Error generating extra drill", err);
     return null;
   }
 };
